@@ -1,5 +1,7 @@
 # PressClips
 
+Small htmx + golang web app to scrape relevant press clips associated with a given PR client.
+
 Go backend + HTMX app that searches the last 24 hours across Brave Search, Exa, and NewsAPI, then deduplicates by URL and renders a unified clip list.
 
 ## Setup
