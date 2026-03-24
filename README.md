@@ -1,8 +1,5 @@
 # PressClips
-
-Small htmx + golang web app to scrape relevant press clips associated with a given PR client.
-
-Go backend + HTMX app that searches the last 24 hours across Brave Search, Exa, and NewsAPI, then deduplicates by URL and renders a unified clip list.
+Go backend + HTMX app that searches the last 24 hours across Brave Search and Exa, then deduplicates by URL and renders a unified clip list formatted to match PR industry press break emails.
 
 ## Setup
 
@@ -10,7 +7,6 @@ Go backend + HTMX app that searches the last 24 hours across Brave Search, Exa, 
 2. Add API keys:
    - `BRAVE_API_KEY`
    - `EXA_API_KEY`
-   - `NEWS_API_KEY`
 3. Run the server:
 
 ```bash
@@ -19,12 +15,24 @@ go run main.go
 
 4. Open `http://localhost:3000`.
 
+## Deployment
+
+Deployed on Fly.io at `pressclips.fly.dev`.
+
+```bash
+fly deploy
+```
+
+API keys are set as Fly secrets (`fly secrets set KEY=value`).
+
 ## Output format
 
-Each result is rendered as:
+Results are grouped under an `[ONLINE]` section header. Each entry is rendered as:
 
-- publication (date)
-- title
-- link
+- PUBLICATION NAME (Month Day, Year)
+- Article title
+- Link
+
+Results are filtered to English-language articles from official media outlets only (social media, forums, and UGC platforms are excluded). Titles are merged across providers to prefer the longest, non-truncated version.
 
 No custom frontend JavaScript is required; UI updates are handled with HTMX.

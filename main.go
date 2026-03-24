@@ -1,14 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -29,12 +32,12 @@ type clip struct {
 }
 
 type providerResult struct {
-	Name         string
-	Clips        []clip
-	RawCount     int
-	RecentCount  int
-	DurationMS   int64
-	Err          error
+	Name        string
+	Clips       []clip
+	RawCount    int
+	RecentCount int
+	DurationMS  int64
+	Err         error
 }
 
 func main() {
@@ -43,17 +46,40 @@ func main() {
 	if port == "" {
 		port = "3000"
 	}
-	log.Printf("env status BRAVE_API_KEY=%s EXA_API_KEY=%s NEWS_API_KEY=%s", maskedEnvStatus("BRAVE_API_KEY"), maskedEnvStatus("EXA_API_KEY"), maskedEnvStatus("NEWS_API_KEY"))
+	log.Printf("env status BRAVE_API_KEY=%s EXA_API_KEY=%s", maskedEnvStatus("BRAVE_API_KEY"), maskedEnvStatus("EXA_API_KEY"))
 
 	http.HandleFunc("/", handleStatic)
 	http.HandleFunc("/styles.css", handleStatic)
 	http.HandleFunc("/search", handleSearch)
 
-	addr := ":" + port
-	log.Printf("PressClips server running at http://localhost:%s", port)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	listener, actualPort, err := listenOnAvailablePort(port)
+	if err != nil {
 		log.Fatal(err)
 	}
+
+	log.Printf("PressClips server running at http://localhost:%s", actualPort)
+	if err := http.Serve(listener, nil); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func listenOnAvailablePort(port string) (net.Listener, string, error) {
+	listener, err := net.Listen("tcp", ":"+port)
+	if err == nil {
+		return listener, port, nil
+	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		return nil, "", err
+	}
+
+	listener, err = net.Listen("tcp", ":0")
+	if err != nil {
+		return nil, "", err
+	}
+
+	actualPort := listener.Addr().(*net.TCPAddr).Port
+	log.Printf("port %s is busy; using available port %d instead", port, actualPort)
+	return listener, fmt.Sprintf("%d", actualPort), nil
 }
 
 func loadDotEnv(path string) {
@@ -158,11 +184,10 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	braveKey := strings.TrimSpace(os.Getenv("BRAVE_API_KEY"))
 	exaKey := strings.TrimSpace(os.Getenv("EXA_API_KEY"))
-	newsAPIKey := strings.TrimSpace(os.Getenv("NEWS_API_KEY"))
-	log.Printf("request env BRAVE_API_KEY=%s EXA_API_KEY=%s NEWS_API_KEY=%s", maskedValue(braveKey), maskedValue(exaKey), maskedValue(newsAPIKey))
+	log.Printf("request env BRAVE_API_KEY=%s EXA_API_KEY=%s", maskedValue(braveKey), maskedValue(exaKey))
 
-	if braveKey == "" || exaKey == "" || newsAPIKey == "" {
-		writeHTML(w, http.StatusInternalServerError, "<p>Missing API keys. Set BRAVE_API_KEY, EXA_API_KEY, and NEWS_API_KEY in your environment.</p>")
+	if braveKey == "" || exaKey == "" {
+		writeHTML(w, http.StatusInternalServerError, "<p>Missing API keys. Set BRAVE_API_KEY and EXA_API_KEY in your environment.</p>")
 		return
 	}
 
@@ -177,7 +202,6 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	calls := []call{
 		{name: "Brave", fn: func(ctx context.Context) providerResult { return searchBrave(ctx, query, since, braveKey) }},
 		{name: "Exa", fn: func(ctx context.Context) providerResult { return searchExa(ctx, query, since, exaKey) }},
-		{name: "NewsAPI", fn: func(ctx context.Context) providerResult { return searchNewsAPI(ctx, query, since, newsAPIKey) }},
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
@@ -213,7 +237,11 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	unique := dedupeAndSort(merged)
 	beforeFilter := len(unique)
 	unique = filterClipsByQuery(unique, query)
-	log.Printf("search done query=%q providers=%d merged=%d unique_before_filter=%d unique_after_filter=%d", query, len(stats), len(merged), beforeFilter, len(unique))
+	afterQueryFilter := len(unique)
+	unique = filterNonOutletClips(unique)
+	afterOutletFilter := len(unique)
+	unique = filterNonEnglish(unique)
+	log.Printf("search done query=%q providers=%d merged=%d unique_before_filter=%d after_query_filter=%d after_outlet_filter=%d after_lang_filter=%d", query, len(stats), len(merged), beforeFilter, afterQueryFilter, afterOutletFilter, len(unique))
 
 	fragment := renderResultsFragment(unique, query, errors, stats)
 	writeHTML(w, http.StatusOK, fragment)
@@ -256,6 +284,8 @@ func parseAnyTime(raw string) *time.Time {
 	layouts := []string{
 		time.RFC3339,
 		time.RFC3339Nano,
+		"2006-01-02T15:04:05",       // ISO 8601 without timezone (Brave page_age)
+		"2006-01-02T15:04:05.000",   // ISO 8601 with millis, no timezone
 		time.RFC1123Z,
 		time.RFC1123,
 		time.RFC822,
@@ -296,19 +326,32 @@ func dedupeAndSort(items []clip) []clip {
 			continue
 		}
 
-		existingUnix := int64(0)
-		if existing.PublishedAt != nil {
-			existingUnix = existing.PublishedAt.Unix()
+		// Merge the best fields from both sources.
+		merged := existing
+
+		// Prefer the longer, non-truncated title.
+		if isBetterTitle(c.Title, existing.Title) {
+			merged.Title = c.Title
 		}
 
-		nextUnix := int64(0)
-		if c.PublishedAt != nil {
-			nextUnix = c.PublishedAt.Unix()
+		// Prefer a valid timestamp, or the more recent one.
+		if c.PublishedAt != nil && (existing.PublishedAt == nil || c.PublishedAt.After(*existing.PublishedAt)) {
+			merged.PublishedAt = c.PublishedAt
 		}
 
-		if nextUnix > existingUnix {
-			byURL[key] = c
+		// Prefer a meaningful publication name.
+		if existing.Publication == "" || existing.Publication == "Unknown publication" {
+			if c.Publication != "" && c.Publication != "Unknown publication" {
+				merged.Publication = c.Publication
+			}
 		}
+
+		// Prefer a longer snippet.
+		if len(c.Snippet) > len(existing.Snippet) {
+			merged.Snippet = c.Snippet
+		}
+
+		byURL[key] = merged
 	}
 
 	unique := make([]clip, 0, len(byURL))
@@ -329,6 +372,61 @@ func dedupeAndSort(items []clip) []clip {
 	})
 
 	return unique
+}
+
+func isBetterTitle(candidate, current string) bool {
+	candidateTrunc := strings.HasSuffix(strings.TrimSpace(candidate), "...")
+	currentTrunc := strings.HasSuffix(strings.TrimSpace(current), "...")
+	// Prefer non-truncated over truncated.
+	if !candidateTrunc && currentTrunc {
+		return true
+	}
+	if candidateTrunc && !currentTrunc {
+		return false
+	}
+	// Both truncated or both complete: prefer longer.
+	return len(candidate) > len(current)
+}
+
+func cleanTitle(title string) string {
+	t := strings.TrimSpace(title)
+	// Strip trailing ellipsis variants.
+	t = strings.TrimRight(t, " ")
+	for _, suffix := range []string{"...", "…"} {
+		t = strings.TrimSuffix(t, suffix)
+	}
+	return strings.TrimSpace(t)
+}
+
+func isLikelyEnglish(s string) bool {
+	if s == "" {
+		return true
+	}
+	total := 0
+	ascii := 0
+	for _, r := range s {
+		if r == ' ' || (r >= '0' && r <= '9') {
+			continue
+		}
+		total++
+		if r <= 127 {
+			ascii++
+		}
+	}
+	if total == 0 {
+		return true
+	}
+	return float64(ascii)/float64(total) >= 0.90
+}
+
+func filterNonEnglish(items []clip) []clip {
+	filtered := make([]clip, 0, len(items))
+	for _, c := range items {
+		if isLikelyEnglish(c.Title) && isLikelyEnglish(c.Snippet) {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
 }
 
 func filterClipsByQuery(items []clip, query string) []clip {
@@ -364,6 +462,84 @@ func filterClipsByQuery(items []clip, query string) []clip {
 		}
 	}
 
+	return filtered
+}
+
+func formatPublicationName(raw string) string {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "UNKNOWN"
+	}
+
+	// If it looks like a domain name (no spaces, contains dots), strip the TLD.
+	if !strings.Contains(name, " ") && strings.Contains(name, ".") {
+		name = strings.TrimPrefix(name, "www.")
+		// Try multi-level TLDs first, then single-level.
+		for _, suffix := range []string{".co.uk", ".com.au", ".co.nz", ".com", ".net", ".org", ".io", ".ca", ".co", ".uk", ".us", ".tv", ".info", ".me", ".biz"} {
+			if strings.HasSuffix(strings.ToLower(name), suffix) {
+				name = name[:len(name)-len(suffix)]
+				break
+			}
+		}
+	}
+
+	return strings.ToUpper(name)
+}
+
+// nonOutletDomains lists domains that are not official media outlets and should
+// be excluded from [ONLINE] results.
+var nonOutletDomains = map[string]bool{
+	// Social media
+	"instagram.com": true,
+	"tiktok.com":    true,
+	"x.com":         true,
+	"twitter.com":   true,
+	"facebook.com":  true,
+	"threads.net":   true,
+	"snapchat.com":  true,
+	"pinterest.com": true,
+	"linkedin.com":  true,
+	// Forums / UGC
+	"reddit.com":        true,
+	"quora.com":         true,
+	"stackoverflow.com": true,
+	// Reference
+	"wikipedia.org": true,
+	"wikimedia.org": true,
+	// E-commerce
+	"amazon.com": true,
+	"ebay.com":   true,
+	// Search engines
+	"google.com": true,
+	"bing.com":   true,
+}
+
+func isNonOutletURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimPrefix(u.Hostname(), "www."))
+
+	if nonOutletDomains[host] {
+		return true
+	}
+	for domain := range nonOutletDomains {
+		if strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterNonOutletClips(items []clip) []clip {
+	filtered := make([]clip, 0, len(items))
+	for _, c := range items {
+		if isNonOutletURL(c.Link) {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
 	return filtered
 }
 
@@ -417,18 +593,21 @@ func renderResultsFragment(results []clip, query string, errs []string, stats []
 	}
 
 	b.WriteString(fmt.Sprintf(`<p class="count">%d unique result(s)</p>`, len(results)))
+	b.WriteString(`<h3 class="section-header">[ONLINE]</h3>`)
 	for _, row := range results {
 		published := "Unknown date"
 		if row.PublishedAt != nil {
-			published = row.PublishedAt.Local().Format("Jan 2, 2006 3:04 PM MST")
+			published = row.PublishedAt.Local().Format("January 2, 2006")
 		}
 
+		pub := formatPublicationName(row.Publication)
+
 		b.WriteString(`<article class="result-item" role="listitem"><div class="pub-date">`)
-		b.WriteString(html.EscapeString(row.Publication))
+		b.WriteString(html.EscapeString(pub))
 		b.WriteString(` (`)
 		b.WriteString(html.EscapeString(published))
 		b.WriteString(`)</div><h3 class="title">`)
-		b.WriteString(html.EscapeString(row.Title))
+		b.WriteString(html.EscapeString(cleanTitle(row.Title)))
 		b.WriteString(`</h3><a class="url" href="`)
 		b.WriteString(html.EscapeString(row.Link))
 		b.WriteString(`" target="_blank" rel="noopener noreferrer">`)
@@ -452,6 +631,7 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey
 	q := u.Query()
 	q.Set("q", fmt.Sprintf("\"%s\"", clientName))
 	q.Set("freshness", "pd")
+	q.Set("search_lang", "en")
 	q.Set("count", "50")
 	u.RawQuery = q.Encode()
 
@@ -538,6 +718,7 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 		"query":              fmt.Sprintf("\"%s\"", clientName),
 		"type":               "auto",
 		"category":           "news",
+		"language":           "en",
 		"num_results":        50,
 		"startPublishedDate": since.Format(time.RFC3339),
 	}
@@ -613,99 +794,6 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 			Link:        link,
 			Snippet:     item.Text,
 			Source:      "Exa",
-		})
-	}
-
-	res.Clips = clipped
-	res.RecentCount = recent
-	return finalizeProviderResult(res, started)
-}
-
-func searchNewsAPI(ctx context.Context, clientName string, since time.Time, apiKey string) providerResult {
-	started := time.Now()
-	res := providerResult{Name: "NewsAPI"}
-
-	u, err := url.Parse("https://newsapi.org/v2/everything")
-	if err != nil {
-		res.Err = err
-		return finalizeProviderResult(res, started)
-	}
-
-	q := u.Query()
-	q.Set("q", fmt.Sprintf("\"%s\"", clientName))
-	q.Set("from", since.Format(time.RFC3339))
-	q.Set("sortBy", "publishedAt")
-	q.Set("language", "en")
-	q.Set("searchIn", "title,description,content")
-	q.Set("pageSize", "100")
-	u.RawQuery = q.Encode()
-
-	log.Printf("provider=NewsAPI request url=%s", u.String())
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		res.Err = err
-		return finalizeProviderResult(res, started)
-	}
-	req.Header.Set("X-Api-Key", apiKey)
-
-	httpResp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		res.Err = err
-		return finalizeProviderResult(res, started)
-	}
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 2048))
-		res.Err = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(respBody)))
-		return finalizeProviderResult(res, started)
-	}
-
-	type newsResponse struct {
-		Articles []struct {
-			Title       string `json:"title"`
-			Description string `json:"description"`
-			URL         string `json:"url"`
-			PublishedAt string `json:"publishedAt"`
-			Source      struct {
-				Name string `json:"name"`
-			} `json:"source"`
-		} `json:"articles"`
-	}
-
-	var response newsResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&response); err != nil {
-		res.Err = err
-		return finalizeProviderResult(res, started)
-	}
-
-	res.RawCount = len(response.Articles)
-	clipped := make([]clip, 0, len(response.Articles))
-	recent := 0
-	for _, item := range response.Articles {
-		link := strings.TrimSpace(item.URL)
-		if link == "" {
-			continue
-		}
-
-		published := parseAnyTime(item.PublishedAt)
-		if isWithinLast24h(published, since) {
-			recent++
-		}
-
-		pub := strings.TrimSpace(item.Source.Name)
-		if pub == "" {
-			pub = domainFromURL(link)
-		}
-
-		clipped = append(clipped, clip{
-			Publication: pub,
-			PublishedAt: published,
-			Title:       fallback(item.Title, "Untitled"),
-			Link:        link,
-			Snippet:     item.Description,
-			Source:      "NewsAPI",
 		})
 	}
 
