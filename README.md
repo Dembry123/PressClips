@@ -27,7 +27,7 @@ API keys are set as Fly secrets (`fly secrets set KEY=value`).
 
 ## Output format
 
-Results are grouped under an `[ONLINE]` section header. Each entry is rendered as:
+Results are grouped under an `[ONLINE]` section header in an Outlook-friendly HTML block. Each entry is rendered as:
 
 - PUBLICATION NAME (Month Day, Year)
 - Article title
@@ -35,4 +35,4 @@ Results are grouped under an `[ONLINE]` section header. Each entry is rendered a
 
 Results are filtered to English-language articles from official media outlets only (social media, forums, and UGC platforms are excluded). Titles are merged across providers to prefer the longest, non-truncated version.
 
-No custom frontend JavaScript is required; UI updates are handled with HTMX.
+The UI uses HTMX for search updates and a small amount of frontend JavaScript for rich clipboard copy so pasted results retain their email formatting more reliably in Outlook.

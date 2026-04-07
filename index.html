@@ -4,43 +4,139 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Press Clips Finder</title>
-  <link rel="stylesheet" href="/styles.css?v=3">
+  <link rel="stylesheet" href="/styles.css?v=4">
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
 </head>
 <body>
-  <main class="app">
-    <h1>Press Clips Finder</h1>
-    <p class="subtitle">Cross-check Brave and Exa for the last 24 hours.</p>
+  <div class="page-shell">
+    <main class="app">
+      <h1>Press Clips Finder</h1>
+      <p class="subtitle">Cross-check Brave and Exa for the last 24 hours.</p>
 
-    <form
-      id="search-form"
-      class="search-form"
-      hx-post="/search"
-      hx-target="#results"
-      hx-swap="innerHTML"
-      hx-indicator="#loading,#results-loading,#search-button"
-      hx-disabled-elt="#search-button"
-    >
-      <label for="client-name">Client name</label>
-      <input id="client-name" name="clientName" type="text" placeholder="e.g. Maura Higgins" required>
-      <button id="search-button" type="submit">
-        <span class="btn-label">Find press clips</span>
-        <span class="btn-progress" aria-hidden="true">...</span>
-      </button>
-    </form>
+      <form
+        id="search-form"
+        class="search-form"
+        hx-post="/search"
+        hx-target="#results"
+        hx-swap="innerHTML"
+        hx-indicator="#loading,#results-loading,#search-button"
+        hx-disabled-elt="#search-button"
+      >
+        <label for="client-name">Client name</label>
+        <input id="client-name" name="clientName" type="text" placeholder="e.g. Maura Higgins" required>
+        <button id="search-button" type="submit">
+          <span class="btn-label">Find press clips</span>
+          <span class="btn-progress" aria-hidden="true">...</span>
+        </button>
+      </form>
 
-    <div class="status">
-      <span id="loading" class="loading">Searching...</span>
-      <span class="idle">Ready.</span>
-    </div>
-
-    <section class="results-wrap">
-      <h2>Results</h2>
-      <div id="results-loading" class="results-loading htmx-indicator">Loading ...</div>
-      <div id="results" class="results" role="list" aria-label="Press clips results">
-        <p>Run a search to load clips.</p>
+      <div class="status">
+        <span id="loading" class="loading">Searching...</span>
+        <span class="idle">Ready.</span>
       </div>
-    </section>
-  </main>
+
+      <section class="results-wrap">
+        <div class="results-header">
+          <h2>Results</h2>
+          <button id="copy-results" class="copy-button" type="button" disabled>
+            <span class="copy-button-label">Copy</span>
+          </button>
+        </div>
+        <div id="results-loading" class="results-loading htmx-indicator">Loading ...</div>
+        <div id="results" class="results" role="list" aria-label="Press clips results">
+          <p>Run a search to load clips.</p>
+        </div>
+      </section>
+    </main>
+
+    <aside class="diagnostics-modal" aria-labelledby="diagnostics-title">
+      <div class="diagnostics-modal-inner">
+        <h2 id="diagnostics-title">Provider Diagnostics</h2>
+        <div id="diagnostics-body" class="diagnostics-body">
+          <p>Run a search to view provider details.</p>
+        </div>
+      </div>
+    </aside>
+  </div>
+  <script>
+    (() => {
+      const results = document.getElementById("results");
+      const copyButton = document.getElementById("copy-results");
+      const copyLabel = copyButton.querySelector(".copy-button-label");
+      let resetTimer = null;
+
+      function getCopyRoot() {
+        return results.querySelector("[data-copy-root]");
+      }
+
+      function setCopyState(state, label) {
+        copyButton.dataset.state = state;
+        copyLabel.textContent = label;
+      }
+
+      function refreshCopyButton() {
+        const hasCopyableContent = Boolean(getCopyRoot());
+        copyButton.disabled = !hasCopyableContent;
+        if (!hasCopyableContent) {
+          clearTimeout(resetTimer);
+          setCopyState("idle", "Copy");
+        } else if (copyButton.dataset.state !== "copied") {
+          setCopyState("idle", "Copy");
+        }
+      }
+
+      async function copyResults() {
+        const copyRoot = getCopyRoot();
+        if (!copyRoot) {
+          return;
+        }
+
+        const richHTML = copyRoot.outerHTML;
+        const plainText = copyRoot.innerText.trim();
+
+        try {
+          if (window.ClipboardItem && navigator.clipboard?.write) {
+            const clipboardItem = new ClipboardItem({
+              "text/html": new Blob([richHTML], { type: "text/html" }),
+              "text/plain": new Blob([plainText], { type: "text/plain" })
+            });
+            await navigator.clipboard.write([clipboardItem]);
+          } else if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(plainText);
+          } else {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNode(copyRoot);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            document.execCommand("copy");
+            selection.removeAllRanges();
+          }
+
+          setCopyState("copied", "Copied");
+          clearTimeout(resetTimer);
+          resetTimer = window.setTimeout(() => {
+            setCopyState("idle", "Copy");
+          }, 1800);
+        } catch (error) {
+          console.error("Unable to copy results", error);
+          setCopyState("error", "Try Cmd+C");
+          clearTimeout(resetTimer);
+          resetTimer = window.setTimeout(() => {
+            setCopyState("idle", "Copy");
+          }, 2400);
+        }
+      }
+
+      copyButton.addEventListener("click", copyResults);
+      document.body.addEventListener("htmx:afterSwap", (event) => {
+        if (event.target.id === "results") {
+          refreshCopyButton();
+        }
+      });
+
+      refreshCopyButton();
+    })();
+  </script>
 </body>
 </html>

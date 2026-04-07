@@ -569,13 +569,58 @@ func normalizeText(s string) string {
 func renderResultsFragment(results []clip, query string, errs []string, stats []providerResult) string {
 	var b strings.Builder
 
-	if len(errs) > 0 {
-		b.WriteString(`<p class="warning">Partial results: `)
-		b.WriteString(html.EscapeString(strings.Join(errs, " | ")))
-		b.WriteString(`</p>`)
+	if len(results) == 0 {
+		b.WriteString(renderDiagnosticsFragment(errs, stats))
+		b.WriteString(fmt.Sprintf(`<p class="empty-state">No clips found for <strong>%s</strong> in the past 24 hours.</p>`, html.EscapeString(query)))
+		return b.String()
 	}
 
-	b.WriteString(`<p class="count">Provider diagnostics:</p><ul class="diag">`)
+	b.WriteString(renderDiagnosticsFragment(errs, stats))
+	b.WriteString(fmt.Sprintf(`<p class="count">%d unique result(s)</p>`, len(results)))
+	b.WriteString(`<div class="email-preview-shell"><div class="email-preview" data-copy-root="press-clips" style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; color:#000000;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; border-spacing:0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; color:#000000; background-color:transparent;"><tr><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">for your files and information, below please find the following press breaks</td></tr><tr><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">[ONLINE]</td></tr>`)
+	for _, row := range results {
+		published := "Unknown date"
+		if row.PublishedAt != nil {
+			published = row.PublishedAt.Local().Format("January 2, 2006")
+		}
+
+		pub := formatPublicationName(row.Publication)
+
+		b.WriteString(`<tr><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000;">`)
+		b.WriteString(`<div style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000;">`)
+		b.WriteString(html.EscapeString(pub))
+		b.WriteString(` <span style="font-weight:400;">(`)
+		b.WriteString(html.EscapeString(published))
+		b.WriteString(`)</span></div>`)
+		b.WriteString(`<div style="padding-top:2px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">`)
+		b.WriteString(html.EscapeString(cleanTitle(row.Title)))
+		b.WriteString(`</div>`)
+		b.WriteString(`<div style="padding-top:2px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000;"><a href="`)
+		b.WriteString(html.EscapeString(row.Link))
+		b.WriteString(`" target="_blank" rel="noopener noreferrer" style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000; text-decoration:underline;">`)
+		b.WriteString(html.EscapeString(row.Link))
+		b.WriteString(`</a></div></td></tr>`)
+	}
+	b.WriteString(`</table></div></div>`)
+
+	return b.String()
+}
+
+func renderDiagnosticsFragment(errs []string, stats []providerResult) string {
+	var b strings.Builder
+
+	b.WriteString(`<div id="diagnostics-body" class="diagnostics-body" hx-swap-oob="innerHTML">`)
+	if len(errs) > 0 {
+		b.WriteString(`<p class="warning">Partial results:</p><ul class="diag">`)
+		for _, errMsg := range errs {
+			b.WriteString(`<li>`)
+			b.WriteString(html.EscapeString(errMsg))
+			b.WriteString(`</li>`)
+		}
+		b.WriteString(`</ul>`)
+	}
+
+	b.WriteString(`<p class="count">Latest provider run:</p><ul class="diag">`)
 	for _, s := range stats {
 		line := fmt.Sprintf("%s -> raw: %d, within 24h: %d, kept: %d, latency: %dms", s.Name, s.RawCount, s.RecentCount, len(s.Clips), s.DurationMS)
 		if s.Err != nil {
@@ -585,35 +630,7 @@ func renderResultsFragment(results []clip, query string, errs []string, stats []
 		b.WriteString(html.EscapeString(line))
 		b.WriteString(`</li>`)
 	}
-	b.WriteString(`</ul>`)
-
-	if len(results) == 0 {
-		b.WriteString(fmt.Sprintf("<p>No clips found for <strong>%s</strong> in the past 24 hours.</p>", html.EscapeString(query)))
-		return b.String()
-	}
-
-	b.WriteString(fmt.Sprintf(`<p class="count">%d unique result(s)</p>`, len(results)))
-	b.WriteString(`<h3 class="section-header">[ONLINE]</h3>`)
-	for _, row := range results {
-		published := "Unknown date"
-		if row.PublishedAt != nil {
-			published = row.PublishedAt.Local().Format("January 2, 2006")
-		}
-
-		pub := formatPublicationName(row.Publication)
-
-		b.WriteString(`<article class="result-item" role="listitem"><div class="pub-date">`)
-		b.WriteString(html.EscapeString(pub))
-		b.WriteString(` (`)
-		b.WriteString(html.EscapeString(published))
-		b.WriteString(`)</div><h3 class="title">`)
-		b.WriteString(html.EscapeString(cleanTitle(row.Title)))
-		b.WriteString(`</h3><a class="url" href="`)
-		b.WriteString(html.EscapeString(row.Link))
-		b.WriteString(`" target="_blank" rel="noopener noreferrer">`)
-		b.WriteString(html.EscapeString(row.Link))
-		b.WriteString(`</a></article>`)
-	}
+	b.WriteString(`</ul></div>`)
 
 	return b.String()
 }
