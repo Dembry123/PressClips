@@ -486,10 +486,7 @@ func formatPublicationName(raw string) string {
 	return strings.ToUpper(name)
 }
 
-// nonOutletDomains lists domains that are not official media outlets and should
-// be excluded from [ONLINE] results.
-var nonOutletDomains = map[string]bool{
-	// Social media
+var socialDomains = map[string]bool{
 	"instagram.com": true,
 	"tiktok.com":    true,
 	"x.com":         true,
@@ -499,19 +496,66 @@ var nonOutletDomains = map[string]bool{
 	"snapchat.com":  true,
 	"pinterest.com": true,
 	"linkedin.com":  true,
-	// Forums / UGC
+	"youtube.com":   true,
+	"youtu.be":      true,
+	"bsky.app":      true,
+	"tumblr.com":    true,
+	"discord.com":   true,
+	"discord.gg":    true,
+	"telegram.me":   true,
+	"t.me":          true,
+	"weibo.com":     true,
+}
+
+var forumDomains = map[string]bool{
 	"reddit.com":        true,
 	"quora.com":         true,
 	"stackoverflow.com": true,
-	// Reference
+}
+
+var referenceDomains = map[string]bool{
 	"wikipedia.org": true,
 	"wikimedia.org": true,
-	// E-commerce
+}
+
+var commerceDomains = map[string]bool{
 	"amazon.com": true,
 	"ebay.com":   true,
-	// Search engines
+}
+
+var searchEngineDomains = map[string]bool{
 	"google.com": true,
 	"bing.com":   true,
+}
+
+var aggregatorDomains = map[string]bool{
+	"msn.com":       true,
+	"aol.com":       true,
+	"yahoo.com":     true,
+	"newsbreak.com": true,
+	"smartnews.com": true,
+	"flipboard.com": true,
+}
+
+var excludedDomainSets = []map[string]bool{
+	socialDomains,
+	forumDomains,
+	referenceDomains,
+	commerceDomains,
+	searchEngineDomains,
+	aggregatorDomains,
+}
+
+func hostMatchesDomainSet(host string, domains map[string]bool) bool {
+	if domains[host] {
+		return true
+	}
+	for domain := range domains {
+		if strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func isNonOutletURL(rawURL string) bool {
@@ -521,11 +565,8 @@ func isNonOutletURL(rawURL string) bool {
 	}
 	host := strings.ToLower(strings.TrimPrefix(u.Hostname(), "www."))
 
-	if nonOutletDomains[host] {
-		return true
-	}
-	for domain := range nonOutletDomains {
-		if strings.HasSuffix(host, "."+domain) {
+	for _, domainSet := range excludedDomainSets {
+		if hostMatchesDomainSet(host, domainSet) {
 			return true
 		}
 	}

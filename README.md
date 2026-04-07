@@ -33,6 +33,6 @@ Results are grouped under an `[ONLINE]` section header in an Outlook-friendly HT
 - Article title
 - Link
 
-Results are filtered to English-language articles from official media outlets only (social media, forums, and UGC platforms are excluded). Titles are merged across providers to prefer the longest, non-truncated version.
+Results are filtered to English-language articles from official media outlets only. Social platforms, forums, search engines, and syndicated aggregation hosts such as AOL, MSN, Yahoo, NewsBreak, SmartNews, and Flipboard are excluded. Titles are merged across providers to prefer the longest, non-truncated version.
 
 The UI uses HTMX for search updates and a small amount of frontend JavaScript for rich clipboard copy so pasted results retain their email formatting more reliably in Outlook.
