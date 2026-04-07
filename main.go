@@ -595,9 +595,9 @@ func renderResultsFragment(results []clip, query string, errs []string, stats []
 		b.WriteString(`<div style="padding-top:2px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">`)
 		b.WriteString(html.EscapeString(cleanTitle(row.Title)))
 		b.WriteString(`</div>`)
-		b.WriteString(`<div style="padding-top:2px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000;"><a href="`)
+		b.WriteString(`<div style="padding-top:2px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#6fa8dc;"><a href="`)
 		b.WriteString(html.EscapeString(row.Link))
-		b.WriteString(`" target="_blank" rel="noopener noreferrer" style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000; text-decoration:underline;">`)
+		b.WriteString(`" target="_blank" rel="noopener noreferrer" style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#6fa8dc; text-decoration:underline;">`)
 		b.WriteString(html.EscapeString(row.Link))
 		b.WriteString(`</a></div></td></tr>`)
 	}
