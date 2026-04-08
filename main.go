@@ -40,6 +40,16 @@ type providerResult struct {
 	Err         error
 }
 
+type searchDiagnostics struct {
+	RawCount      int
+	RecentCount   int
+	Normalized    int
+	UniqueURLs    int
+	QueryMatched  int
+	OutletAllowed int
+	EnglishKept   int
+}
+
 func main() {
 	loadDotEnv(".env")
 	port := strings.TrimSpace(os.Getenv("PORT"))
@@ -224,6 +234,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	merged := make([]clip, 0, 256)
 	errors := make([]string, 0, len(calls))
 	stats := make([]providerResult, 0, len(calls))
+	diag := searchDiagnostics{}
 
 	for res := range resultsCh {
 		stats = append(stats, res)
@@ -231,19 +242,27 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 			errors = append(errors, fmt.Sprintf("%s: %s", res.Name, res.Err.Error()))
 			continue
 		}
+		diag.RawCount += res.RawCount
+		diag.RecentCount += res.RecentCount
+		diag.Normalized += len(res.Clips)
 		merged = append(merged, res.Clips...)
 	}
 
-	unique := dedupeAndSort(merged)
-	beforeFilter := len(unique)
-	unique = filterClipsByQuery(unique, query)
-	afterQueryFilter := len(unique)
-	unique = filterNonOutletClips(unique)
-	afterOutletFilter := len(unique)
-	unique = filterNonEnglish(unique)
-	log.Printf("search done query=%q providers=%d merged=%d unique_before_filter=%d after_query_filter=%d after_outlet_filter=%d after_lang_filter=%d", query, len(stats), len(merged), beforeFilter, afterQueryFilter, afterOutletFilter, len(unique))
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].Name < stats[j].Name
+	})
 
-	fragment := renderResultsFragment(unique, query, errors, stats)
+	unique := dedupeAndSort(merged)
+	diag.UniqueURLs = len(unique)
+	unique = filterClipsByQuery(unique, query)
+	diag.QueryMatched = len(unique)
+	unique = filterNonOutletClips(unique)
+	diag.OutletAllowed = len(unique)
+	unique = filterNonEnglish(unique)
+	diag.EnglishKept = len(unique)
+	log.Printf("search done query=%q providers=%d raw=%d recent=%d normalized=%d unique_urls=%d after_query_filter=%d after_outlet_filter=%d after_lang_filter=%d", query, len(stats), diag.RawCount, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept)
+
+	fragment := renderResultsFragment(unique, query, errors, stats, diag)
 	writeHTML(w, http.StatusOK, fragment)
 }
 
@@ -284,8 +303,8 @@ func parseAnyTime(raw string) *time.Time {
 	layouts := []string{
 		time.RFC3339,
 		time.RFC3339Nano,
-		"2006-01-02T15:04:05",       // ISO 8601 without timezone (Brave page_age)
-		"2006-01-02T15:04:05.000",   // ISO 8601 with millis, no timezone
+		"2006-01-02T15:04:05",     // ISO 8601 without timezone (Brave page_age)
+		"2006-01-02T15:04:05.000", // ISO 8601 with millis, no timezone
 		time.RFC1123Z,
 		time.RFC1123,
 		time.RFC822,
@@ -607,16 +626,16 @@ func normalizeText(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-func renderResultsFragment(results []clip, query string, errs []string, stats []providerResult) string {
+func renderResultsFragment(results []clip, query string, errs []string, stats []providerResult, diag searchDiagnostics) string {
 	var b strings.Builder
 
 	if len(results) == 0 {
-		b.WriteString(renderDiagnosticsFragment(errs, stats))
+		b.WriteString(renderDiagnosticsFragment(errs, stats, diag))
 		b.WriteString(fmt.Sprintf(`<p class="empty-state">No clips found for <strong>%s</strong> in the past 24 hours.</p>`, html.EscapeString(query)))
 		return b.String()
 	}
 
-	b.WriteString(renderDiagnosticsFragment(errs, stats))
+	b.WriteString(renderDiagnosticsFragment(errs, stats, diag))
 	b.WriteString(fmt.Sprintf(`<p class="count">%d unique result(s)</p>`, len(results)))
 	b.WriteString(`<div class="email-preview-shell"><div class="email-preview" data-copy-root="press-clips" style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; color:#000000;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; border-spacing:0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; color:#000000; background-color:transparent;"><tr><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">for your files and information, below please find the following press breaks</td></tr><tr><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">[ONLINE]</td></tr>`)
 	for _, row := range results {
@@ -647,7 +666,7 @@ func renderResultsFragment(results []clip, query string, errs []string, stats []
 	return b.String()
 }
 
-func renderDiagnosticsFragment(errs []string, stats []providerResult) string {
+func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searchDiagnostics) string {
 	var b strings.Builder
 
 	b.WriteString(`<div id="diagnostics-body" class="diagnostics-body" hx-swap-oob="innerHTML">`)
@@ -661,9 +680,15 @@ func renderDiagnosticsFragment(errs []string, stats []providerResult) string {
 		b.WriteString(`</ul>`)
 	}
 
+	b.WriteString(`<p class="count">Overall widdling:</p><ul class="diag">`)
+	overallLine := fmt.Sprintf("All providers -> raw: %d -> dated within 24h: %d -> normalized: %d -> unique URLs: %d -> name match: %d -> official outlets: %d -> English/final: %d", diag.RawCount, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept)
+	b.WriteString(`<li>`)
+	b.WriteString(html.EscapeString(overallLine))
+	b.WriteString(`</li></ul>`)
+
 	b.WriteString(`<p class="count">Latest provider run:</p><ul class="diag">`)
 	for _, s := range stats {
-		line := fmt.Sprintf("%s -> raw: %d, within 24h: %d, kept: %d, latency: %dms", s.Name, s.RawCount, s.RecentCount, len(s.Clips), s.DurationMS)
+		line := fmt.Sprintf("%s -> raw: %d -> dated within 24h: %d -> normalized: %d, latency: %dms", s.Name, s.RawCount, s.RecentCount, len(s.Clips), s.DurationMS)
 		if s.Err != nil {
 			line = fmt.Sprintf("%s -> error: %s", s.Name, s.Err.Error())
 		}
@@ -865,7 +890,7 @@ func finalizeProviderResult(res providerResult, started time.Time) providerResul
 	if res.Err != nil {
 		log.Printf("provider=%s status=error latency_ms=%d error=%s", res.Name, res.DurationMS, res.Err.Error())
 	} else {
-		log.Printf("provider=%s status=ok latency_ms=%d raw=%d within_24h=%d kept=%d", res.Name, res.DurationMS, res.RawCount, res.RecentCount, len(res.Clips))
+		log.Printf("provider=%s status=ok latency_ms=%d raw=%d dated_within_24h=%d normalized=%d", res.Name, res.DurationMS, res.RawCount, res.RecentCount, len(res.Clips))
 	}
 	return res
 }
