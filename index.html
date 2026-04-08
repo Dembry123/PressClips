@@ -141,6 +141,27 @@
         refreshCopyButton({ resetState: resetCopyState });
       }
 
+      function normalizeClipboardText(text) {
+        return text
+          .replace(/\r\n/g, "\n")
+          .replace(/[ \t]+\n/g, "\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+      }
+
+      function buildClipRowText(row) {
+        const card = row.querySelector(".clip-row-card");
+        if (!card) {
+          return row.innerText.trim();
+        }
+
+        return Array.from(card.children)
+          .filter((child) => child.tagName !== "BUTTON")
+          .map((child) => child.innerText.trim())
+          .filter(Boolean)
+          .join("\n");
+      }
+
       function createClipboardSnapshot() {
         const copyRoot = getCopyRoot();
         if (!copyRoot || getResultsCount() === 0) {
@@ -152,21 +173,15 @@
           node.remove();
         });
 
-        const staging = document.createElement("div");
-        staging.setAttribute("aria-hidden", "true");
-        staging.style.position = "fixed";
-        staging.style.left = "-9999px";
-        staging.style.top = "0";
-        staging.style.opacity = "0";
-        staging.style.pointerEvents = "none";
-        staging.appendChild(snapshotRoot);
-        document.body.appendChild(staging);
+        const plainText = normalizeClipboardText(
+          Array.from(snapshotRoot.querySelectorAll("tr"))
+            .map((row) => row.matches("[data-clip-row]") ? buildClipRowText(row) : row.innerText.trim())
+            .filter(Boolean)
+            .join("\n\n")
+        );
 
         return {
-          staging,
-          snapshotRoot,
-          richHTML: snapshotRoot.outerHTML,
-          plainText: snapshotRoot.innerText.trim()
+          plainText
         };
       }
 
@@ -176,25 +191,29 @@
           return;
         }
 
-        const { staging, snapshotRoot, richHTML, plainText } = snapshot;
+        const { plainText } = snapshot;
 
         try {
-          if (window.ClipboardItem && navigator.clipboard?.write) {
+          if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(plainText);
+          } else if (window.ClipboardItem && navigator.clipboard?.write) {
             const clipboardItem = new ClipboardItem({
-              "text/html": new Blob([richHTML], { type: "text/html" }),
               "text/plain": new Blob([plainText], { type: "text/plain" })
             });
             await navigator.clipboard.write([clipboardItem]);
-          } else if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(plainText);
           } else {
-            const selection = window.getSelection();
-            const range = document.createRange();
-            range.selectNodeContents(snapshotRoot);
-            selection.removeAllRanges();
-            selection.addRange(range);
+            const textarea = document.createElement("textarea");
+            textarea.value = plainText;
+            textarea.setAttribute("readonly", "");
+            textarea.style.position = "fixed";
+            textarea.style.left = "-9999px";
+            textarea.style.top = "0";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
             document.execCommand("copy");
-            selection.removeAllRanges();
+            textarea.remove();
           }
 
           setCopyState("copied", "Copied");
@@ -209,8 +228,6 @@
           resetTimer = window.setTimeout(() => {
             setCopyState("idle", "Copy");
           }, 2400);
-        } finally {
-          staging.remove();
         }
       }
 
