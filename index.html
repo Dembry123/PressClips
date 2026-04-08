@@ -63,10 +63,35 @@
       const results = document.getElementById("results");
       const copyButton = document.getElementById("copy-results");
       const copyLabel = copyButton.querySelector(".copy-button-label");
+      const emptyStateMessage = "All clips removed from this list.";
       let resetTimer = null;
 
       function getCopyRoot() {
         return results.querySelector("[data-copy-root]");
+      }
+
+      function getClipRows(scope = results) {
+        return Array.from(scope.querySelectorAll("[data-clip-row]"));
+      }
+
+      function getResultsCount() {
+        return getClipRows().length;
+      }
+
+      function getCountLabel(count) {
+        return `${count} unique result(s)`;
+      }
+
+      function getResultsCountNode() {
+        return results.querySelector("[data-results-count]");
+      }
+
+      function getPreviewShell() {
+        return results.querySelector("[data-results-preview]");
+      }
+
+      function getEmptyStateNode() {
+        return results.querySelector("[data-results-empty]");
       }
 
       function setCopyState(state, label) {
@@ -74,10 +99,10 @@
         copyLabel.textContent = label;
       }
 
-      function refreshCopyButton() {
-        const hasCopyableContent = Boolean(getCopyRoot());
+      function refreshCopyButton({ resetState = false } = {}) {
+        const hasCopyableContent = Boolean(getCopyRoot()) && getResultsCount() > 0;
         copyButton.disabled = !hasCopyableContent;
-        if (!hasCopyableContent) {
+        if (!hasCopyableContent || resetState) {
           clearTimeout(resetTimer);
           setCopyState("idle", "Copy");
         } else if (copyButton.dataset.state !== "copied") {
@@ -85,14 +110,73 @@
         }
       }
 
-      async function copyResults() {
+      function syncResultsState({ resetCopyState = false } = {}) {
+        const resultCount = getResultsCount();
+        const countNode = getResultsCountNode();
+        const previewShell = getPreviewShell();
+        let emptyStateNode = getEmptyStateNode();
+
+        if (countNode) {
+          countNode.textContent = getCountLabel(resultCount);
+        }
+
+        if (previewShell) {
+          previewShell.hidden = resultCount === 0;
+
+          if (resultCount === 0) {
+            if (!emptyStateNode) {
+              emptyStateNode = document.createElement("p");
+              emptyStateNode.className = "empty-state";
+              emptyStateNode.dataset.resultsEmpty = "true";
+              emptyStateNode.textContent = emptyStateMessage;
+              previewShell.insertAdjacentElement("afterend", emptyStateNode);
+            }
+          } else if (emptyStateNode) {
+            emptyStateNode.remove();
+          }
+        } else if (emptyStateNode) {
+          emptyStateNode.remove();
+        }
+
+        refreshCopyButton({ resetState: resetCopyState });
+      }
+
+      function createClipboardSnapshot() {
         const copyRoot = getCopyRoot();
-        if (!copyRoot) {
+        if (!copyRoot || getResultsCount() === 0) {
+          return null;
+        }
+
+        const snapshotRoot = copyRoot.cloneNode(true);
+        snapshotRoot.querySelectorAll("[data-copy-strip]").forEach((node) => {
+          node.remove();
+        });
+
+        const staging = document.createElement("div");
+        staging.setAttribute("aria-hidden", "true");
+        staging.style.position = "fixed";
+        staging.style.left = "-9999px";
+        staging.style.top = "0";
+        staging.style.opacity = "0";
+        staging.style.pointerEvents = "none";
+        staging.appendChild(snapshotRoot);
+        document.body.appendChild(staging);
+
+        return {
+          staging,
+          snapshotRoot,
+          richHTML: snapshotRoot.outerHTML,
+          plainText: snapshotRoot.innerText.trim()
+        };
+      }
+
+      async function copyResults() {
+        const snapshot = createClipboardSnapshot();
+        if (!snapshot) {
           return;
         }
 
-        const richHTML = copyRoot.outerHTML;
-        const plainText = copyRoot.innerText.trim();
+        const { staging, snapshotRoot, richHTML, plainText } = snapshot;
 
         try {
           if (window.ClipboardItem && navigator.clipboard?.write) {
@@ -106,7 +190,7 @@
           } else {
             const selection = window.getSelection();
             const range = document.createRange();
-            range.selectNode(copyRoot);
+            range.selectNodeContents(snapshotRoot);
             selection.removeAllRanges();
             selection.addRange(range);
             document.execCommand("copy");
@@ -125,17 +209,34 @@
           resetTimer = window.setTimeout(() => {
             setCopyState("idle", "Copy");
           }, 2400);
+        } finally {
+          staging.remove();
         }
       }
 
       copyButton.addEventListener("click", copyResults);
+      results.addEventListener("click", (event) => {
+        const deleteButton = event.target.closest("[data-delete-clip]");
+        if (!deleteButton || !results.contains(deleteButton)) {
+          return;
+        }
+
+        const clipRow = deleteButton.closest("[data-clip-row]");
+        if (!clipRow) {
+          return;
+        }
+
+        clipRow.remove();
+        syncResultsState({ resetCopyState: true });
+      });
+
       document.body.addEventListener("htmx:afterSwap", (event) => {
         if (event.target.id === "results") {
-          refreshCopyButton();
+          syncResultsState({ resetCopyState: true });
         }
       });
 
-      refreshCopyButton();
+      syncResultsState({ resetCopyState: true });
     })();
   </script>
 </body>
