@@ -152,6 +152,13 @@ button:active {
   margin: 0;
 }
 
+.results-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.undo-button,
 .copy-button {
   min-width: 5.25rem;
   padding: 0.55rem 0.85rem;
@@ -161,18 +168,31 @@ button:active {
   box-shadow: none;
 }
 
+.undo-button:hover:not(:disabled),
 .copy-button:hover:not(:disabled) {
   background: #f7f9fc;
   box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
   filter: none;
 }
 
+.undo-button:disabled,
 .copy-button:disabled {
   cursor: not-allowed;
   color: #98a2b3;
   background: #f8fafc;
   border-color: #dde3ec;
   box-shadow: none;
+}
+
+.undo-button:not(:disabled) {
+  color: #7c2d12;
+  border-color: #f1c49d;
+  background: #fff7ed;
+}
+
+.undo-button:not(:disabled):hover {
+  background: #ffedd5;
+  box-shadow: 0 4px 12px rgba(124, 45, 18, 0.09);
 }
 
 .copy-button[data-state="copied"] {

@@ -38,9 +38,14 @@
       <section class="results-wrap">
         <div class="results-header">
           <h2>Results</h2>
-          <button id="copy-results" class="copy-button" type="button" disabled>
-            <span class="copy-button-label">Copy</span>
-          </button>
+          <div class="results-actions">
+            <button id="undo-deletions" class="undo-button" type="button" hidden disabled>
+              Undo deletions
+            </button>
+            <button id="copy-results" class="copy-button" type="button" disabled>
+              <span class="copy-button-label">Copy</span>
+            </button>
+          </div>
         </div>
         <div id="results-loading" class="results-loading htmx-indicator">Loading ...</div>
         <div id="results" class="results" role="list" aria-label="Press clips results">
@@ -61,9 +66,11 @@
   <script>
     (() => {
       const results = document.getElementById("results");
+      const undoButton = document.getElementById("undo-deletions");
       const copyButton = document.getElementById("copy-results");
       const copyLabel = copyButton.querySelector(".copy-button-label");
       const emptyStateMessage = "All clips removed from this list.";
+      let deletedRows = [];
       let resetTimer = null;
 
       function getCopyRoot() {
@@ -92,6 +99,30 @@
 
       function getEmptyStateNode() {
         return results.querySelector("[data-results-empty]");
+      }
+
+      function getResultsRowContainer() {
+        const firstTableRow = results.querySelector("[data-copy-root] tr");
+        return firstTableRow?.parentNode ?? null;
+      }
+
+      function seedClipOrder() {
+        getClipRows().forEach((row, index) => {
+          row.dataset.clipOrder = String(index);
+        });
+      }
+
+      function clearDeletedRows() {
+        deletedRows = [];
+      }
+
+      function refreshUndoButton() {
+        const deletedCount = deletedRows.length;
+        undoButton.hidden = deletedCount === 0;
+        undoButton.disabled = deletedCount === 0;
+        undoButton.textContent = deletedCount > 0
+          ? `Undo deletions (${deletedCount})`
+          : "Undo deletions";
       }
 
       function setCopyState(state, label) {
@@ -138,7 +169,37 @@
           emptyStateNode.remove();
         }
 
+        refreshUndoButton();
         refreshCopyButton({ resetState: resetCopyState });
+      }
+
+      function restoreDeletedRows() {
+        if (deletedRows.length === 0) {
+          return;
+        }
+
+        const rowContainer = getResultsRowContainer();
+        if (!rowContainer) {
+          clearDeletedRows();
+          syncResultsState({ resetCopyState: true });
+          return;
+        }
+
+        deletedRows
+          .sort((a, b) => a.order - b.order)
+          .forEach(({ row, order }) => {
+            const insertBeforeRow = getClipRows(rowContainer)
+              .find((existingRow) => Number(existingRow.dataset.clipOrder) > order);
+
+            if (insertBeforeRow) {
+              rowContainer.insertBefore(row, insertBeforeRow);
+            } else {
+              rowContainer.appendChild(row);
+            }
+          });
+
+        clearDeletedRows();
+        syncResultsState({ resetCopyState: true });
       }
 
       function normalizeClipboardText(text) {
@@ -232,6 +293,7 @@
       }
 
       copyButton.addEventListener("click", copyResults);
+      undoButton.addEventListener("click", restoreDeletedRows);
       results.addEventListener("click", (event) => {
         const deleteButton = event.target.closest("[data-delete-clip]");
         if (!deleteButton || !results.contains(deleteButton)) {
@@ -243,16 +305,24 @@
           return;
         }
 
+        const clipOrder = Number(clipRow.dataset.clipOrder);
+        deletedRows.push({
+          row: clipRow,
+          order: Number.isFinite(clipOrder) ? clipOrder : getClipRows().indexOf(clipRow)
+        });
         clipRow.remove();
         syncResultsState({ resetCopyState: true });
       });
 
       document.body.addEventListener("htmx:afterSwap", (event) => {
         if (event.target.id === "results") {
+          clearDeletedRows();
+          seedClipOrder();
           syncResultsState({ resetCopyState: true });
         }
       });
 
+      seedClipOrder();
       syncResultsState({ resetCopyState: true });
     })();
   </script>
