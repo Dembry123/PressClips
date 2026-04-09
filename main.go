@@ -28,6 +28,7 @@ type clip struct {
 	Title       string
 	Link        string
 	Snippet     string
+	SearchText  string
 	Source      string
 }
 
@@ -370,6 +371,8 @@ func dedupeAndSort(items []clip) []clip {
 			merged.Snippet = c.Snippet
 		}
 
+		merged.SearchText = mergeTextContent(existing.SearchText, c.SearchText)
+
 		byURL[key] = merged
 	}
 
@@ -391,6 +394,24 @@ func dedupeAndSort(items []clip) []clip {
 	})
 
 	return unique
+}
+
+func mergeTextContent(current, candidate string) string {
+	current = strings.TrimSpace(current)
+	candidate = strings.TrimSpace(candidate)
+
+	switch {
+	case current == "":
+		return candidate
+	case candidate == "":
+		return current
+	case strings.Contains(current, candidate):
+		return current
+	case strings.Contains(candidate, current):
+		return candidate
+	default:
+		return current + "\n" + candidate
+	}
 }
 
 func isBetterTitle(candidate, current string) bool {
@@ -457,7 +478,7 @@ func filterClipsByQuery(items []clip, query string) []clip {
 
 	filtered := make([]clip, 0, len(items))
 	for _, c := range items {
-		haystack := normalizeText(strings.Join([]string{c.Title, c.Snippet, c.Link, c.Publication}, " "))
+		haystack := normalizeText(strings.Join([]string{c.Title, c.Snippet, c.SearchText, c.Link, c.Publication}, " "))
 		if haystack == "" {
 			continue
 		}
@@ -482,6 +503,63 @@ func filterClipsByQuery(items []clip, query string) []clip {
 	}
 
 	return filtered
+}
+
+func joinTextParts(parts ...string) string {
+	seen := make(map[string]bool, len(parts))
+	joined := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			continue
+		}
+		seen[part] = true
+		joined = append(joined, part)
+	}
+
+	return strings.Join(joined, "\n")
+}
+
+func bestSnippet(primary string, fallbacks ...string) string {
+	primary = strings.TrimSpace(primary)
+	if primary != "" {
+		return primary
+	}
+	for _, fallback := range fallbacks {
+		fallback = strings.TrimSpace(fallback)
+		if fallback != "" {
+			return fallback
+		}
+	}
+	return ""
+}
+
+func quoteForSearch(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	return `"` + strings.ReplaceAll(raw, `"`, `\"`) + `"`
+}
+
+func buildBraveBodyAwareQuery(clientName string) string {
+	clientName = strings.TrimSpace(clientName)
+	if clientName == "" {
+		return ""
+	}
+	return "inpage:" + quoteForSearch(clientName)
+}
+
+func exaIncludeText(clientName string) []string {
+	trimmed := strings.TrimSpace(clientName)
+	if trimmed == "" {
+		return nil
+	}
+	if len(strings.Fields(trimmed)) > 5 {
+		return nil
+	}
+	return []string{trimmed}
 }
 
 func formatPublicationName(raw string) string {
@@ -714,10 +792,11 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey
 	}
 
 	q := u.Query()
-	q.Set("q", fmt.Sprintf("\"%s\"", clientName))
+	q.Set("q", buildBraveBodyAwareQuery(clientName))
 	q.Set("freshness", "pd")
 	q.Set("search_lang", "en")
 	q.Set("count", "50")
+	q.Set("extra_snippets", "true")
 	u.RawQuery = q.Encode()
 
 	log.Printf("provider=Brave request url=%s", u.String())
@@ -745,10 +824,11 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey
 
 	type braveResponse struct {
 		Results []struct {
-			Title       string `json:"title"`
-			URL         string `json:"url"`
-			Description string `json:"description"`
-			PageAge     string `json:"page_age"`
+			Title       string   `json:"title"`
+			URL         string   `json:"url"`
+			Description string   `json:"description"`
+			ExtraSnips  []string `json:"extra_snippets"`
+			PageAge     string   `json:"page_age"`
 			MetaURL     struct {
 				Hostname string `json:"hostname"`
 			} `json:"meta_url"`
@@ -785,7 +865,8 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey
 			PublishedAt: published,
 			Title:       fallback(item.Title, "Untitled"),
 			Link:        link,
-			Snippet:     item.Description,
+			Snippet:     bestSnippet(item.Description, strings.Join(item.ExtraSnips, " ")),
+			SearchText:  joinTextParts(item.Description, strings.Join(item.ExtraSnips, "\n")),
 			Source:      "Brave",
 		})
 	}
@@ -800,12 +881,19 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 	res := providerResult{Name: "Exa"}
 
 	payload := map[string]any{
-		"query":              fmt.Sprintf("\"%s\"", clientName),
+		"query":              strings.TrimSpace(clientName),
 		"type":               "auto",
 		"category":           "news",
-		"language":           "en",
-		"num_results":        50,
+		"numResults":         50,
 		"startPublishedDate": since.Format(time.RFC3339),
+		"contents": map[string]any{
+			"highlights": map[string]any{
+				"maxCharacters": 4000,
+			},
+		},
+	}
+	if includeText := exaIncludeText(clientName); len(includeText) > 0 {
+		payload["includeText"] = includeText
 	}
 
 	body, err := json.Marshal(payload)
@@ -839,11 +927,12 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 
 	type exaResponse struct {
 		Results []struct {
-			Title         string `json:"title"`
-			URL           string `json:"url"`
-			Text          string `json:"text"`
-			PublishedDate string `json:"publishedDate"`
-			Author        string `json:"author"`
+			Title         string   `json:"title"`
+			URL           string   `json:"url"`
+			Text          string   `json:"text"`
+			Highlights    []string `json:"highlights"`
+			PublishedDate string   `json:"publishedDate"`
+			Author        string   `json:"author"`
 		} `json:"results"`
 	}
 
@@ -877,7 +966,8 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 			PublishedAt: published,
 			Title:       fallback(item.Title, "Untitled"),
 			Link:        link,
-			Snippet:     item.Text,
+			Snippet:     bestSnippet(firstNonEmpty(item.Highlights...), item.Text),
+			SearchText:  joinTextParts(item.Text, strings.Join(item.Highlights, "\n")),
 			Source:      "Exa",
 		})
 	}
@@ -902,6 +992,16 @@ func truncateForLog(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func fallback(value, defaultValue string) string {
