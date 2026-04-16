@@ -58,11 +58,18 @@ label {
 }
 
 input,
+select,
 button {
   font: inherit;
   padding: 0.65rem 0.8rem;
   border-radius: 8px;
   border: 1px solid var(--border);
+}
+
+input,
+select {
+  background: #ffffff;
+  color: var(--text);
 }
 
 button {

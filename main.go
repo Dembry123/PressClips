@@ -33,12 +33,14 @@ type clip struct {
 }
 
 type providerResult struct {
-	Name        string
-	Clips       []clip
-	RawCount    int
-	RecentCount int
-	DurationMS  int64
-	Err         error
+	Name          string
+	Clips         []clip
+	RawCount      int
+	RecentCount   int
+	DurationMS    int64
+	DebugRequest  any
+	DebugResponse any
+	Err           error
 }
 
 type searchDiagnostics struct {
@@ -49,6 +51,30 @@ type searchDiagnostics struct {
 	QueryMatched  int
 	OutletAllowed int
 	EnglishKept   int
+}
+
+type searchWindow struct {
+	Value          string
+	Label          string
+	Duration       time.Duration
+	BraveFreshness string
+}
+
+type providerDebugPayload struct {
+	Query     string              `json:"query"`
+	Window    string              `json:"window"`
+	Generated string              `json:"generated"`
+	Providers []providerDebugItem `json:"providers"`
+}
+
+type providerDebugItem struct {
+	Name        string `json:"name"`
+	DurationMS  int64  `json:"durationMs"`
+	RawCount    int    `json:"rawCount"`
+	RecentCount int    `json:"recentCount"`
+	Request     any    `json:"request,omitempty"`
+	Response    any    `json:"response,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 func main() {
@@ -193,6 +219,12 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	window, err := parseSearchWindow(r.FormValue("searchWindow"))
+	if err != nil {
+		writeHTML(w, http.StatusBadRequest, "<p>Please choose a valid time range.</p>")
+		return
+	}
+
 	braveKey := strings.TrimSpace(os.Getenv("BRAVE_API_KEY"))
 	exaKey := strings.TrimSpace(os.Getenv("EXA_API_KEY"))
 	log.Printf("request env BRAVE_API_KEY=%s EXA_API_KEY=%s", maskedValue(braveKey), maskedValue(exaKey))
@@ -202,8 +234,8 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	since := time.Now().UTC().Add(-24 * time.Hour)
-	log.Printf("search start query=%q since=%s", query, since.Format(time.RFC3339))
+	since := time.Now().UTC().Add(-window.Duration)
+	log.Printf("search start query=%q window=%s since=%s", query, window.Value, since.Format(time.RFC3339))
 
 	type call struct {
 		name string
@@ -211,7 +243,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	calls := []call{
-		{name: "Brave", fn: func(ctx context.Context) providerResult { return searchBrave(ctx, query, since, braveKey) }},
+		{name: "Brave", fn: func(ctx context.Context) providerResult { return searchBrave(ctx, query, since, window, braveKey) }},
 		{name: "Exa", fn: func(ctx context.Context) providerResult { return searchExa(ctx, query, since, exaKey) }},
 	}
 
@@ -263,7 +295,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	diag.EnglishKept = len(unique)
 	log.Printf("search done query=%q providers=%d raw=%d recent=%d normalized=%d unique_urls=%d after_query_filter=%d after_outlet_filter=%d after_lang_filter=%d", query, len(stats), diag.RawCount, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept)
 
-	fragment := renderResultsFragment(unique, query, errors, stats, diag)
+	fragment := renderResultsFragment(unique, query, window, errors, stats, diag)
 	writeHTML(w, http.StatusOK, fragment)
 }
 
@@ -325,11 +357,34 @@ func parseAnyTime(raw string) *time.Time {
 	return nil
 }
 
-func isWithinLast24h(ts *time.Time, since time.Time) bool {
+func isWithinWindow(ts *time.Time, since time.Time) bool {
 	if ts == nil {
 		return false
 	}
 	return ts.After(since)
+}
+
+func parseSearchWindow(raw string) (searchWindow, error) {
+	switch strings.TrimSpace(raw) {
+	case "", "1d":
+		return searchWindow{
+			Value:          "1d",
+			Label:          "past day",
+			Duration:       24 * time.Hour,
+			BraveFreshness: "pd",
+		}, nil
+	case "3d":
+		return searchWindow{
+			Value:    "3d",
+			Label:    "past 3 days",
+			Duration: 72 * time.Hour,
+			// Brave offers day/week freshness buckets, so we widen to a week
+			// here and then keep the exact 72-hour cutoff with local filtering.
+			BraveFreshness: "pw",
+		}, nil
+	default:
+		return searchWindow{}, fmt.Errorf("unsupported search window %q", raw)
+	}
 }
 
 func dedupeAndSort(items []clip) []clip {
@@ -704,16 +759,18 @@ func normalizeText(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-func renderResultsFragment(results []clip, query string, errs []string, stats []providerResult, diag searchDiagnostics) string {
+func renderResultsFragment(results []clip, query string, window searchWindow, errs []string, stats []providerResult, diag searchDiagnostics) string {
 	var b strings.Builder
 
+	b.WriteString(renderProviderDebugFragment(query, window, stats))
+
 	if len(results) == 0 {
-		b.WriteString(renderDiagnosticsFragment(errs, stats, diag))
-		b.WriteString(fmt.Sprintf(`<p class="empty-state">No clips found for <strong>%s</strong> in the past 24 hours.</p>`, html.EscapeString(query)))
+		b.WriteString(renderDiagnosticsFragment(errs, stats, diag, window))
+		b.WriteString(fmt.Sprintf(`<p class="empty-state">No clips found for <strong>%s</strong> in the %s.</p>`, html.EscapeString(query), html.EscapeString(window.Label)))
 		return b.String()
 	}
 
-	b.WriteString(renderDiagnosticsFragment(errs, stats, diag))
+	b.WriteString(renderDiagnosticsFragment(errs, stats, diag, window))
 	b.WriteString(fmt.Sprintf(`<p class="count" data-results-count>%d unique result(s)</p>`, len(results)))
 	b.WriteString(`<div class="email-preview-shell" data-results-preview><div class="email-preview" data-copy-root="press-clips" style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; color:#000000;"><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%; border-collapse:collapse; border-spacing:0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; color:#000000; background-color:transparent;"><tr><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">for your files and information, below please find the following press breaks</td></tr><tr><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">[ONLINE]</td></tr>`)
 	for _, row := range results {
@@ -746,7 +803,39 @@ func renderResultsFragment(results []clip, query string, errs []string, stats []
 	return b.String()
 }
 
-func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searchDiagnostics) string {
+func renderProviderDebugFragment(query string, window searchWindow, stats []providerResult) string {
+	payload := providerDebugPayload{
+		Query:     query,
+		Window:    window.Value,
+		Generated: time.Now().UTC().Format(time.RFC3339),
+		Providers: make([]providerDebugItem, 0, len(stats)),
+	}
+
+	for _, stat := range stats {
+		item := providerDebugItem{
+			Name:        stat.Name,
+			DurationMS:  stat.DurationMS,
+			RawCount:    stat.RawCount,
+			RecentCount: stat.RecentCount,
+			Request:     stat.DebugRequest,
+			Response:    stat.DebugResponse,
+		}
+		if stat.Err != nil {
+			item.Error = stat.Err.Error()
+		}
+		payload.Providers = append(payload.Providers, item)
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("provider debug marshal failed: %v", err)
+		return ""
+	}
+
+	return `<script type="application/json" data-provider-debug>` + string(encoded) + `</script>`
+}
+
+func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searchDiagnostics, window searchWindow) string {
 	var b strings.Builder
 
 	b.WriteString(`<div id="diagnostics-body" class="diagnostics-body" hx-swap-oob="innerHTML">`)
@@ -761,14 +850,14 @@ func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searc
 	}
 
 	b.WriteString(`<p class="count">Overall widdling:</p><ul class="diag">`)
-	overallLine := fmt.Sprintf("All providers -> raw: %d -> dated within 24h: %d -> normalized: %d -> unique URLs: %d -> name match: %d -> official outlets: %d -> English/final: %d", diag.RawCount, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept)
+	overallLine := fmt.Sprintf("All providers -> raw: %d -> dated within %s: %d -> normalized: %d -> unique URLs: %d -> name match: %d -> official outlets: %d -> English/final: %d", diag.RawCount, window.Label, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept)
 	b.WriteString(`<li>`)
 	b.WriteString(html.EscapeString(overallLine))
 	b.WriteString(`</li></ul>`)
 
 	b.WriteString(`<p class="count">Latest provider run:</p><ul class="diag">`)
 	for _, s := range stats {
-		line := fmt.Sprintf("%s -> raw: %d -> dated within 24h: %d -> normalized: %d, latency: %dms", s.Name, s.RawCount, s.RecentCount, len(s.Clips), s.DurationMS)
+		line := fmt.Sprintf("%s -> raw: %d -> dated within %s: %d -> normalized: %d, latency: %dms", s.Name, s.RawCount, window.Label, s.RecentCount, len(s.Clips), s.DurationMS)
 		if s.Err != nil {
 			line = fmt.Sprintf("%s -> error: %s", s.Name, s.Err.Error())
 		}
@@ -781,7 +870,7 @@ func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searc
 	return b.String()
 }
 
-func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey string) providerResult {
+func searchBrave(ctx context.Context, clientName string, since time.Time, window searchWindow, apiKey string) providerResult {
 	started := time.Now()
 	res := providerResult{Name: "Brave"}
 
@@ -793,11 +882,22 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey
 
 	q := u.Query()
 	q.Set("q", buildBraveBodyAwareQuery(clientName))
-	q.Set("freshness", "pd")
+	q.Set("freshness", window.BraveFreshness)
 	q.Set("search_lang", "en")
 	q.Set("count", "50")
 	q.Set("extra_snippets", "true")
 	u.RawQuery = q.Encode()
+	res.DebugRequest = map[string]any{
+		"method": "GET",
+		"url":    u.String(),
+		"query": map[string]any{
+			"q":              q.Get("q"),
+			"freshness":      q.Get("freshness"),
+			"search_lang":    q.Get("search_lang"),
+			"count":          q.Get("count"),
+			"extra_snippets": q.Get("extra_snippets"),
+		},
+	}
 
 	log.Printf("provider=Brave request url=%s", u.String())
 
@@ -816,8 +916,14 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey
 	}
 	defer httpResp.Body.Close()
 
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
+	if err != nil {
+		res.Err = err
+		return finalizeProviderResult(res, started)
+	}
+	res.DebugResponse = parseJSONDebugValue(body)
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 2048))
 		res.Err = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(body)))
 		return finalizeProviderResult(res, started)
 	}
@@ -836,7 +942,7 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey
 	}
 
 	var payload braveResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		res.Err = err
 		return finalizeProviderResult(res, started)
 	}
@@ -851,7 +957,7 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, apiKey
 		}
 
 		published := parseAnyTime(item.PageAge)
-		if isWithinLast24h(published, since) {
+		if isWithinWindow(published, since) {
 			recent++
 		}
 
@@ -895,6 +1001,11 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 	if includeText := exaIncludeText(clientName); len(includeText) > 0 {
 		payload["includeText"] = includeText
 	}
+	res.DebugRequest = map[string]any{
+		"method": "POST",
+		"url":    "https://api.exa.ai/search",
+		"body":   payload,
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -919,8 +1030,14 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 	}
 	defer httpResp.Body.Close()
 
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
+	if err != nil {
+		res.Err = err
+		return finalizeProviderResult(res, started)
+	}
+	res.DebugResponse = parseJSONDebugValue(respBody)
+
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 2048))
 		res.Err = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(respBody)))
 		return finalizeProviderResult(res, started)
 	}
@@ -937,7 +1054,7 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 	}
 
 	var response exaResponse
-	if err := json.NewDecoder(httpResp.Body).Decode(&response); err != nil {
+	if err := json.Unmarshal(respBody, &response); err != nil {
 		res.Err = err
 		return finalizeProviderResult(res, started)
 	}
@@ -952,7 +1069,7 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 		}
 
 		published := parseAnyTime(item.PublishedDate)
-		if isWithinLast24h(published, since) {
+		if isWithinWindow(published, since) {
 			recent++
 		}
 
@@ -982,7 +1099,7 @@ func finalizeProviderResult(res providerResult, started time.Time) providerResul
 	if res.Err != nil {
 		log.Printf("provider=%s status=error latency_ms=%d error=%s", res.Name, res.DurationMS, res.Err.Error())
 	} else {
-		log.Printf("provider=%s status=ok latency_ms=%d raw=%d dated_within_24h=%d normalized=%d", res.Name, res.DurationMS, res.RawCount, res.RecentCount, len(res.Clips))
+		log.Printf("provider=%s status=ok latency_ms=%d raw=%d dated_within_window=%d normalized=%d", res.Name, res.DurationMS, res.RawCount, res.RecentCount, len(res.Clips))
 	}
 	return res
 }
@@ -992,6 +1109,16 @@ func truncateForLog(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func parseJSONDebugValue(raw []byte) any {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return map[string]any{
+			"raw": string(raw),
+		}
+	}
+	return value
 }
 
 func firstNonEmpty(values ...string) string {
