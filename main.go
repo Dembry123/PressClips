@@ -606,17 +606,6 @@ func buildBraveBodyAwareQuery(clientName string) string {
 	return "inpage:" + quoteForSearch(clientName)
 }
 
-func exaIncludeText(clientName string) []string {
-	trimmed := strings.TrimSpace(clientName)
-	if trimmed == "" {
-		return nil
-	}
-	if len(strings.Fields(trimmed)) > 5 {
-		return nil
-	}
-	return []string{trimmed}
-}
-
 func formatPublicationName(raw string) string {
 	name := strings.TrimSpace(raw)
 	if name == "" {
@@ -644,6 +633,7 @@ var socialDomains = map[string]bool{
 	"x.com":         true,
 	"twitter.com":   true,
 	"facebook.com":  true,
+	"threads.com":   true,
 	"threads.net":   true,
 	"snapchat.com":  true,
 	"pinterest.com": true,
@@ -997,9 +987,6 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 				"maxCharacters": 4000,
 			},
 		},
-	}
-	if includeText := exaIncludeText(clientName); len(includeText) > 0 {
-		payload["includeText"] = includeText
 	}
 	res.DebugRequest = map[string]any{
 		"method": "POST",
