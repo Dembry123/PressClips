@@ -339,7 +339,11 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	since := time.Now().UTC().Add(-window.Duration)
 	searchID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
-	logSearchf(searchID, "trace start query=%q window=%s since=%s", query, window.Value, since.Format(time.RFC3339))
+	logSearchEvent(searchID, "trace_start", map[string]any{
+		"query":  query,
+		"window": window.Value,
+		"since":  since.Format(time.RFC3339),
+	})
 
 	type call struct {
 		name string
@@ -410,7 +414,17 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	publicationCancel()
 	logClipStage(searchID, "after resolveClipPublications", unique)
 	logRenderedResults(searchID, unique)
-	logSearchf(searchID, "trace complete providers=%d raw=%d recent=%d normalized=%d unique_urls=%d after_query_filter=%d after_outlet_filter=%d after_lang_filter=%d rendered=%d", len(stats), diag.RawCount, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept, len(unique))
+	logSearchEvent(searchID, "trace_complete", map[string]any{
+		"provider_count":       len(stats),
+		"raw_count":            diag.RawCount,
+		"recent_count":         diag.RecentCount,
+		"normalized_count":     diag.Normalized,
+		"unique_url_count":     diag.UniqueURLs,
+		"query_matched_count":  diag.QueryMatched,
+		"outlet_allowed_count": diag.OutletAllowed,
+		"english_kept_count":   diag.EnglishKept,
+		"rendered_count":       len(unique),
+	})
 
 	fragment := renderResultsFragment(unique, query, window, errors, stats, diag)
 	writeHTML(w, http.StatusOK, fragment)
@@ -422,38 +436,167 @@ func writeHTML(w http.ResponseWriter, status int, body string) {
 	_, _ = w.Write([]byte(body))
 }
 
-func logSearchf(searchID, format string, args ...any) {
-	log.Printf("[search:%s] "+format, append([]any{searchID}, args...)...)
-}
-
-func logSearchBlock(searchID, label, body string) {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		body = "<empty>"
+func logSearchEvent(searchID, event string, fields map[string]any) {
+	entry := map[string]any{
+		"kind":      "search_trace",
+		"search_id": searchID,
+		"event":     event,
 	}
-	log.Printf("[search:%s] %s\n%s", searchID, label, body)
-}
+	for key, value := range fields {
+		if value == nil {
+			continue
+		}
+		entry[key] = sanitizeLogValue(value)
+	}
 
-func prettyJSONForLog(value any) string {
-	encoded, err := json.MarshalIndent(value, "", "  ")
+	encoded, err := json.Marshal(entry)
 	if err != nil {
-		return fmt.Sprintf("%+v", value)
+		log.Printf(`{"kind":"search_trace","search_id":%q,"event":"log_encoding_error","error":%q}`, searchID, err.Error())
+		return
 	}
-	return string(encoded)
+	log.Print(string(encoded))
 }
 
-func prettyRawJSONForLog(raw []byte) string {
+func sanitizeLogValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		sanitized := make(map[string]any, len(typed))
+		for key, child := range typed {
+			sanitized[key] = sanitizeLogValue(child)
+		}
+		return sanitized
+	case []any:
+		sanitized := make([]any, 0, len(typed))
+		for _, child := range typed {
+			sanitized = append(sanitized, sanitizeLogValue(child))
+		}
+		return sanitized
+	case string:
+		return truncateLogString(typed, 800)
+	default:
+		return value
+	}
+}
+
+func truncateLogString(raw string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(raw)
+	if len(runes) <= max {
+		return raw
+	}
+	return string(runes[:max]) + fmt.Sprintf("... [truncated %d chars]", len(runes)-max)
+}
+
+func decodeJSONLogPayload(raw []byte) any {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
 		return "<empty>"
 	}
 
-	var formatted bytes.Buffer
-	if err := json.Indent(&formatted, raw, "", "  "); err == nil {
-		return formatted.String()
+	var payload any
+	if err := json.Unmarshal(raw, &payload); err == nil {
+		return payload
 	}
 
 	return string(raw)
+}
+
+func sortedMapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func logProviderRequest(searchID, provider string, payload map[string]any) {
+	logSearchEvent(searchID, "provider_request", map[string]any{
+		"provider": provider,
+		"payload":  payload,
+	})
+}
+
+func logProviderRawResponse(searchID, provider string, statusCode int, raw []byte) {
+	payload := decodeJSONLogPayload(raw)
+	switch typed := payload.(type) {
+	case map[string]any:
+		summary := map[string]any{
+			"provider":       provider,
+			"status_code":    statusCode,
+			"top_level_keys": sortedMapKeys(typed),
+		}
+		if results, ok := typed["results"].([]any); ok {
+			summary["result_count"] = len(results)
+
+			meta := make(map[string]any, len(typed))
+			for key, value := range typed {
+				if key == "results" {
+					continue
+				}
+				meta[key] = value
+			}
+			if len(meta) > 0 {
+				summary["payload"] = meta
+			}
+
+			logSearchEvent(searchID, "provider_raw_response_summary", summary)
+			for index, item := range results {
+				logSearchEvent(searchID, "provider_raw_response_item", map[string]any{
+					"provider":    provider,
+					"status_code": statusCode,
+					"item_index":  index,
+					"payload":     item,
+				})
+			}
+			return
+		}
+
+		logSearchEvent(searchID, "provider_raw_response", map[string]any{
+			"provider":    provider,
+			"status_code": statusCode,
+			"payload":     typed,
+		})
+	case []any:
+		logSearchEvent(searchID, "provider_raw_response_summary", map[string]any{
+			"provider":     provider,
+			"status_code":  statusCode,
+			"result_count": len(typed),
+		})
+		for index, item := range typed {
+			logSearchEvent(searchID, "provider_raw_response_item", map[string]any{
+				"provider":    provider,
+				"status_code": statusCode,
+				"item_index":  index,
+				"payload":     item,
+			})
+		}
+	default:
+		logSearchEvent(searchID, "provider_raw_response", map[string]any{
+			"provider":    provider,
+			"status_code": statusCode,
+			"payload":     payload,
+		})
+	}
+}
+
+func logProviderNormalized(searchID, provider string, rawCount, recentCount int, clips []clip) {
+	logSearchEvent(searchID, "provider_normalized_summary", map[string]any{
+		"provider":         provider,
+		"raw_count":        rawCount,
+		"recent_count":     recentCount,
+		"normalized_count": len(clips),
+	})
+
+	for index, entry := range clipLogEntries(clips) {
+		logSearchEvent(searchID, "provider_normalized_item", map[string]any{
+			"provider":   provider,
+			"item_index": index,
+			"payload":    entry,
+		})
+	}
 }
 
 func clipLogEntries(clips []clip) []map[string]any {
@@ -505,34 +648,52 @@ func previewText(raw string, max int) string {
 }
 
 func logClipStage(searchID, stage string, clips []clip) {
-	logSearchf(searchID, "%s count=%d", stage, len(clips))
-	logSearchBlock(searchID, stage+" payload", prettyJSONForLog(clipLogEntries(clips)))
+	logSearchEvent(searchID, "clip_stage_summary", map[string]any{
+		"stage": stage,
+		"count": len(clips),
+	})
+	for index, entry := range clipLogEntries(clips) {
+		logSearchEvent(searchID, "clip_stage_item", map[string]any{
+			"stage":      stage,
+			"item_index": index,
+			"payload":    entry,
+		})
+	}
 }
 
 func logRenderedResults(searchID string, clips []clip) {
-	logSearchf(searchID, "rendered results count=%d", len(clips))
-	logSearchBlock(searchID, "rendered results payload", prettyJSONForLog(renderedResultLogEntries(clips)))
+	logSearchEvent(searchID, "rendered_results_summary", map[string]any{
+		"count": len(clips),
+	})
+	for index, entry := range renderedResultLogEntries(clips) {
+		logSearchEvent(searchID, "rendered_results_item", map[string]any{
+			"item_index": index,
+			"payload":    entry,
+		})
+	}
 }
 
 func logProviderRunSummary(searchID string, stats []providerResult, errs []string) {
-	summary := make([]map[string]any, 0, len(stats))
+	logSearchEvent(searchID, "provider_run_summary", map[string]any{
+		"provider_count": len(stats),
+		"error_count":    len(errs),
+		"errors":         errs,
+	})
 	for _, stat := range stats {
-		item := map[string]any{
-			"name":        stat.Name,
-			"durationMs":  stat.DurationMS,
-			"rawCount":    stat.RawCount,
-			"recentCount": stat.RecentCount,
-			"normalized":  len(stat.Clips),
+		fields := map[string]any{
+			"provider":         stat.Name,
+			"duration_ms":      stat.DurationMS,
+			"raw_count":        stat.RawCount,
+			"recent_count":     stat.RecentCount,
+			"normalized_count": len(stat.Clips),
+			"status":           "ok",
 		}
 		if stat.Err != nil {
-			item["error"] = stat.Err.Error()
+			fields["status"] = "error"
+			fields["error"] = stat.Err.Error()
 		}
-		summary = append(summary, item)
+		logSearchEvent(searchID, "provider_run_item", fields)
 	}
-	logSearchBlock(searchID, "provider run summary", prettyJSONForLog(map[string]any{
-		"errors":    errs,
-		"providers": summary,
-	}))
 }
 
 func normalizeURL(raw string) string {
@@ -1653,7 +1814,7 @@ func searchBrave(ctx context.Context, searchID, clientName string, since time.Ti
 			"extra_snippets": q.Get("extra_snippets"),
 		},
 	}
-	logSearchBlock(searchID, "Brave upstream request", prettyJSONForLog(requestPayload))
+	logProviderRequest(searchID, "Brave", requestPayload)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -1675,7 +1836,7 @@ func searchBrave(ctx context.Context, searchID, clientName string, since time.Ti
 		res.Err = err
 		return finalizeProviderResult(searchID, res, started)
 	}
-	logSearchBlock(searchID, fmt.Sprintf("Brave upstream response status=%d", httpResp.StatusCode), prettyRawJSONForLog(body))
+	logProviderRawResponse(searchID, "Brave", httpResp.StatusCode, body)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		res.Err = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(body)))
@@ -1733,8 +1894,7 @@ func searchBrave(ctx context.Context, searchID, clientName string, since time.Ti
 
 	res.Clips = clipped
 	res.RecentCount = recent
-	logSearchf(searchID, "Brave normalized raw=%d dated_within_window=%d normalized=%d", res.RawCount, res.RecentCount, len(res.Clips))
-	logSearchBlock(searchID, "Brave post-processing payload", prettyJSONForLog(clipLogEntries(res.Clips)))
+	logProviderNormalized(searchID, "Brave", res.RawCount, res.RecentCount, res.Clips)
 	return finalizeProviderResult(searchID, res, started)
 }
 
@@ -1759,7 +1919,7 @@ func searchExa(ctx context.Context, searchID, clientName string, since time.Time
 		"url":    "https://api.exa.ai/search",
 		"body":   payload,
 	}
-	logSearchBlock(searchID, "Exa upstream request", prettyJSONForLog(requestPayload))
+	logProviderRequest(searchID, "Exa", requestPayload)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1787,7 +1947,7 @@ func searchExa(ctx context.Context, searchID, clientName string, since time.Time
 		res.Err = err
 		return finalizeProviderResult(searchID, res, started)
 	}
-	logSearchBlock(searchID, fmt.Sprintf("Exa upstream response status=%d", httpResp.StatusCode), prettyRawJSONForLog(respBody))
+	logProviderRawResponse(searchID, "Exa", httpResp.StatusCode, respBody)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		res.Err = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(respBody)))
@@ -1843,17 +2003,30 @@ func searchExa(ctx context.Context, searchID, clientName string, since time.Time
 
 	res.Clips = clipped
 	res.RecentCount = recent
-	logSearchf(searchID, "Exa normalized raw=%d dated_within_window=%d normalized=%d", res.RawCount, res.RecentCount, len(res.Clips))
-	logSearchBlock(searchID, "Exa post-processing payload", prettyJSONForLog(clipLogEntries(res.Clips)))
+	logProviderNormalized(searchID, "Exa", res.RawCount, res.RecentCount, res.Clips)
 	return finalizeProviderResult(searchID, res, started)
 }
 
 func finalizeProviderResult(searchID string, res providerResult, started time.Time) providerResult {
 	res.DurationMS = time.Since(started).Milliseconds()
 	if res.Err != nil {
-		logSearchf(searchID, "provider=%s status=error latency_ms=%d error=%s", res.Name, res.DurationMS, res.Err.Error())
+		logSearchEvent(searchID, "provider_call_complete", map[string]any{
+			"provider":     res.Name,
+			"status":       "error",
+			"latency_ms":   res.DurationMS,
+			"error":        res.Err.Error(),
+			"raw_count":    res.RawCount,
+			"recent_count": res.RecentCount,
+		})
 	} else {
-		logSearchf(searchID, "provider=%s status=ok latency_ms=%d raw=%d dated_within_window=%d normalized=%d", res.Name, res.DurationMS, res.RawCount, res.RecentCount, len(res.Clips))
+		logSearchEvent(searchID, "provider_call_complete", map[string]any{
+			"provider":         res.Name,
+			"status":           "ok",
+			"latency_ms":       res.DurationMS,
+			"raw_count":        res.RawCount,
+			"recent_count":     res.RecentCount,
+			"normalized_count": len(res.Clips),
+		})
 	}
 	return res
 }
