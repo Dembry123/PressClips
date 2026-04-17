@@ -106,10 +106,6 @@
         return results.querySelector("[data-results-empty]");
       }
 
-      function getProviderDebugNode(scope = results) {
-        return scope.querySelector("[data-provider-debug]");
-      }
-
       function getResultsRowContainer() {
         const firstTableRow = results.querySelector("[data-copy-root] tr");
         return firstTableRow?.parentNode ?? null;
@@ -180,44 +176,6 @@
 
         refreshUndoButton();
         refreshCopyButton({ resetState: resetCopyState });
-      }
-
-      function logProviderDebugPayload(scope = results) {
-        const debugNode = getProviderDebugNode(scope);
-        if (!debugNode) {
-          return;
-        }
-
-        try {
-          const payload = JSON.parse(debugNode.textContent);
-          const providerCount = Array.isArray(payload.providers) ? payload.providers.length : 0;
-          console.groupCollapsed(
-            `PressClips provider JSON: ${payload.query || "unknown query"} (${payload.window || "unknown window"})`
-          );
-          console.log("Search debug payload", payload);
-
-          if (providerCount === 0) {
-            console.warn("No provider debug objects were returned.");
-          }
-
-          (payload.providers || []).forEach((provider) => {
-            console.groupCollapsed(`${provider.name} raw API payload`);
-            if (provider.request) {
-              console.log("Request", provider.request);
-            }
-            if (provider.response !== undefined) {
-              console.log("Response", provider.response);
-            }
-            if (provider.error) {
-              console.warn("Provider error", provider.error);
-            }
-            console.groupEnd();
-          });
-
-          console.groupEnd();
-        } catch (error) {
-          console.error("Unable to parse provider debug payload", error);
-        }
       }
 
       function restoreDeletedRows() {
@@ -366,7 +324,6 @@
           clearDeletedRows();
           seedClipOrder();
           syncResultsState({ resetCopyState: true });
-          logProviderDebugPayload(event.target);
         }
       });
 

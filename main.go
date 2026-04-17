@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
+	stdhtml "html"
 	"io"
 	"log"
 	"net"
@@ -20,6 +20,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+
+	xhtml "golang.org/x/net/html"
+	"golang.org/x/net/publicsuffix"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 type clip struct {
@@ -33,14 +39,12 @@ type clip struct {
 }
 
 type providerResult struct {
-	Name          string
-	Clips         []clip
-	RawCount      int
-	RecentCount   int
-	DurationMS    int64
-	DebugRequest  any
-	DebugResponse any
-	Err           error
+	Name        string
+	Clips       []clip
+	RawCount    int
+	RecentCount int
+	DurationMS  int64
+	Err         error
 }
 
 type searchDiagnostics struct {
@@ -60,21 +64,120 @@ type searchWindow struct {
 	BraveFreshness string
 }
 
-type providerDebugPayload struct {
-	Query     string              `json:"query"`
-	Window    string              `json:"window"`
-	Generated string              `json:"generated"`
-	Providers []providerDebugItem `json:"providers"`
+type publicationLookupTarget struct {
+	Key  string
+	Link string
 }
 
-type providerDebugItem struct {
-	Name        string `json:"name"`
-	DurationMS  int64  `json:"durationMs"`
-	RawCount    int    `json:"rawCount"`
-	RecentCount int    `json:"recentCount"`
-	Request     any    `json:"request,omitempty"`
-	Response    any    `json:"response,omitempty"`
-	Error       string `json:"error,omitempty"`
+var publicationTitleCaser = cases.Title(language.English)
+
+var publicationMetadataHTTPClient = &http.Client{
+	Timeout: 2500 * time.Millisecond,
+}
+
+var publicationNameOverrides = map[string]string{
+	"abcnews":        "ABC News",
+	"apnews":         "AP News",
+	"cbsnews":        "CBS News",
+	"dailymail":      "Daily Mail",
+	"eastbaytimes":   "East Bay Times",
+	"eonline":        "E! News",
+	"foxnews":        "Fox News",
+	"latimes":        "Los Angeles Times",
+	"nbcnews":        "NBC News",
+	"nypost":         "New York Post",
+	"nytimes":        "The New York Times",
+	"ok":             "OK!",
+	"okmagazine":     "OK! Magazine",
+	"tmz":            "TMZ",
+	"usatoday":       "USA Today",
+	"washingtonpost": "The Washington Post",
+	"wsj":            "The Wall Street Journal",
+}
+
+var outletLexicon = []string{
+	"associated",
+	"angeles",
+	"business",
+	"chronicle",
+	"daily",
+	"dispatch",
+	"east",
+	"entertainment",
+	"evening",
+	"examiner",
+	"express",
+	"financial",
+	"gazette",
+	"globe",
+	"herald",
+	"hollywood",
+	"independent",
+	"insider",
+	"journal",
+	"leader",
+	"london",
+	"los",
+	"magazine",
+	"mail",
+	"mirror",
+	"morning",
+	"national",
+	"news",
+	"observer",
+	"online",
+	"people",
+	"post",
+	"press",
+	"record",
+	"register",
+	"reporter",
+	"review",
+	"standard",
+	"star",
+	"sun",
+	"telegraph",
+	"times",
+	"today",
+	"tribune",
+	"usa",
+	"variety",
+	"weekly",
+	"west",
+	"wire",
+	"world",
+	"york",
+	"bay",
+	"new",
+}
+
+var shortPublicationAcronyms = map[string]bool{
+	"ABC": true,
+	"AP":  true,
+	"BBC": true,
+	"CBS": true,
+	"CNN": true,
+	"E":   true,
+	"LA":  true,
+	"NBC": true,
+	"NY":  true,
+	"OK":  true,
+	"TMZ": true,
+	"TV":  true,
+	"UK":  true,
+	"UPI": true,
+	"USA": true,
+	"WSJ": true,
+}
+
+var publicationSmallWords = map[string]bool{
+	"and": true,
+	"for": true,
+	"in":  true,
+	"of":  true,
+	"on":  true,
+	"the": true,
+	"to":  true,
 }
 
 func main() {
@@ -235,7 +338,8 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	since := time.Now().UTC().Add(-window.Duration)
-	log.Printf("search start query=%q window=%s since=%s", query, window.Value, since.Format(time.RFC3339))
+	searchID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	logSearchf(searchID, "trace start query=%q window=%s since=%s", query, window.Value, since.Format(time.RFC3339))
 
 	type call struct {
 		name string
@@ -243,8 +347,10 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	calls := []call{
-		{name: "Brave", fn: func(ctx context.Context) providerResult { return searchBrave(ctx, query, since, window, braveKey) }},
-		{name: "Exa", fn: func(ctx context.Context) providerResult { return searchExa(ctx, query, since, exaKey) }},
+		{name: "Brave", fn: func(ctx context.Context) providerResult {
+			return searchBrave(ctx, searchID, query, since, window, braveKey)
+		}},
+		{name: "Exa", fn: func(ctx context.Context) providerResult { return searchExa(ctx, searchID, query, since, exaKey) }},
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
@@ -284,16 +390,27 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(stats, func(i, j int) bool {
 		return stats[i].Name < stats[j].Name
 	})
+	logProviderRunSummary(searchID, stats, errors)
+	logClipStage(searchID, "provider-normalized clips", merged)
 
 	unique := dedupeAndSort(merged)
 	diag.UniqueURLs = len(unique)
+	logClipStage(searchID, "after dedupeAndSort", unique)
 	unique = filterClipsByQuery(unique, query)
 	diag.QueryMatched = len(unique)
+	logClipStage(searchID, "after filterClipsByQuery", unique)
 	unique = filterNonOutletClips(unique)
 	diag.OutletAllowed = len(unique)
+	logClipStage(searchID, "after filterNonOutletClips", unique)
 	unique = filterNonEnglish(unique)
 	diag.EnglishKept = len(unique)
-	log.Printf("search done query=%q providers=%d raw=%d recent=%d normalized=%d unique_urls=%d after_query_filter=%d after_outlet_filter=%d after_lang_filter=%d", query, len(stats), diag.RawCount, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept)
+	logClipStage(searchID, "after filterNonEnglish", unique)
+	publicationCtx, publicationCancel := context.WithTimeout(r.Context(), 6*time.Second)
+	unique = resolveClipPublications(publicationCtx, unique)
+	publicationCancel()
+	logClipStage(searchID, "after resolveClipPublications", unique)
+	logRenderedResults(searchID, unique)
+	logSearchf(searchID, "trace complete providers=%d raw=%d recent=%d normalized=%d unique_urls=%d after_query_filter=%d after_outlet_filter=%d after_lang_filter=%d rendered=%d", len(stats), diag.RawCount, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept, len(unique))
 
 	fragment := renderResultsFragment(unique, query, window, errors, stats, diag)
 	writeHTML(w, http.StatusOK, fragment)
@@ -303,6 +420,119 @@ func writeHTML(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(body))
+}
+
+func logSearchf(searchID, format string, args ...any) {
+	log.Printf("[search:%s] "+format, append([]any{searchID}, args...)...)
+}
+
+func logSearchBlock(searchID, label, body string) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		body = "<empty>"
+	}
+	log.Printf("[search:%s] %s\n%s", searchID, label, body)
+}
+
+func prettyJSONForLog(value any) string {
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%+v", value)
+	}
+	return string(encoded)
+}
+
+func prettyRawJSONForLog(raw []byte) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return "<empty>"
+	}
+
+	var formatted bytes.Buffer
+	if err := json.Indent(&formatted, raw, "", "  "); err == nil {
+		return formatted.String()
+	}
+
+	return string(raw)
+}
+
+func clipLogEntries(clips []clip) []map[string]any {
+	entries := make([]map[string]any, 0, len(clips))
+	for _, c := range clips {
+		entry := map[string]any{
+			"source":      c.Source,
+			"publication": c.Publication,
+			"title":       cleanTitle(c.Title),
+			"link":        c.Link,
+		}
+		if c.PublishedAt != nil {
+			entry["publishedAt"] = c.PublishedAt.UTC().Format(time.RFC3339)
+		}
+		if snippet := previewText(c.Snippet, 240); snippet != "" {
+			entry["snippetPreview"] = snippet
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func renderedResultLogEntries(clips []clip) []map[string]any {
+	entries := make([]map[string]any, 0, len(clips))
+	for _, c := range clips {
+		published := "Unknown date"
+		if c.PublishedAt != nil {
+			published = c.PublishedAt.Local().Format("January 2, 2006")
+		}
+		entries = append(entries, map[string]any{
+			"publication": formatPublicationName(c.Publication, c.Link),
+			"published":   published,
+			"title":       cleanTitle(c.Title),
+			"link":        c.Link,
+		})
+	}
+	return entries
+}
+
+func previewText(raw string, max int) string {
+	raw = strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
+	if raw == "" || max <= 0 {
+		return ""
+	}
+	if len(raw) <= max {
+		return raw
+	}
+	return raw[:max] + "..."
+}
+
+func logClipStage(searchID, stage string, clips []clip) {
+	logSearchf(searchID, "%s count=%d", stage, len(clips))
+	logSearchBlock(searchID, stage+" payload", prettyJSONForLog(clipLogEntries(clips)))
+}
+
+func logRenderedResults(searchID string, clips []clip) {
+	logSearchf(searchID, "rendered results count=%d", len(clips))
+	logSearchBlock(searchID, "rendered results payload", prettyJSONForLog(renderedResultLogEntries(clips)))
+}
+
+func logProviderRunSummary(searchID string, stats []providerResult, errs []string) {
+	summary := make([]map[string]any, 0, len(stats))
+	for _, stat := range stats {
+		item := map[string]any{
+			"name":        stat.Name,
+			"durationMs":  stat.DurationMS,
+			"rawCount":    stat.RawCount,
+			"recentCount": stat.RecentCount,
+			"normalized":  len(stat.Clips),
+		}
+		if stat.Err != nil {
+			item["error"] = stat.Err.Error()
+		}
+		summary = append(summary, item)
+	}
+	logSearchBlock(searchID, "provider run summary", prettyJSONForLog(map[string]any{
+		"errors":    errs,
+		"providers": summary,
+	}))
 }
 
 func normalizeURL(raw string) string {
@@ -606,25 +836,592 @@ func buildBraveBodyAwareQuery(clientName string) string {
 	return "inpage:" + quoteForSearch(clientName)
 }
 
-func formatPublicationName(raw string) string {
-	name := strings.TrimSpace(raw)
-	if name == "" {
-		return "UNKNOWN"
+func resolveClipPublications(ctx context.Context, items []clip) []clip {
+	if len(items) == 0 {
+		return items
 	}
 
-	// If it looks like a domain name (no spaces, contains dots), strip the TLD.
-	if !strings.Contains(name, " ") && strings.Contains(name, ".") {
-		name = strings.TrimPrefix(name, "www.")
-		// Try multi-level TLDs first, then single-level.
-		for _, suffix := range []string{".co.uk", ".com.au", ".co.nz", ".com", ".net", ".org", ".io", ".ca", ".co", ".uk", ".us", ".tv", ".info", ".me", ".biz"} {
-			if strings.HasSuffix(strings.ToLower(name), suffix) {
-				name = name[:len(name)-len(suffix)]
-				break
+	resolved := append([]clip(nil), items...)
+	lookupTargets := make(map[string]publicationLookupTarget)
+
+	for i := range resolved {
+		rawPublication := firstNonEmpty(resolved[i].Publication, domainFromURL(resolved[i].Link))
+		resolved[i].Publication = formatPublicationName(rawPublication, resolved[i].Link)
+
+		if !shouldLookupPublicationMetadata(rawPublication, resolved[i].Publication, resolved[i].Link) {
+			continue
+		}
+
+		target := buildPublicationLookupTarget(rawPublication, resolved[i].Link)
+		if target.Key == "" || target.Link == "" {
+			continue
+		}
+		if _, found := lookupTargets[target.Key]; !found {
+			lookupTargets[target.Key] = target
+		}
+	}
+
+	metadataNames := fetchPublicationMetadataNames(ctx, lookupTargets)
+	if len(metadataNames) == 0 {
+		return resolved
+	}
+
+	for i := range resolved {
+		target := buildPublicationLookupTarget(items[i].Publication, resolved[i].Link)
+		if target.Key == "" {
+			continue
+		}
+		if metadataName := metadataNames[target.Key]; metadataName != "" {
+			resolved[i].Publication = metadataName
+		}
+	}
+
+	return resolved
+}
+
+func formatPublicationName(raw, link string) string {
+	name := strings.TrimSpace(stdhtml.UnescapeString(raw))
+	if name == "" {
+		name = domainFromURL(link)
+	}
+	if name == "" {
+		return "Unknown Publication"
+	}
+
+	if host := publicationHostFromValue(name); host != "" {
+		if normalized := normalizePublicationHost(host); normalized != "" {
+			return normalized
+		}
+	}
+
+	if override := publicationOverride(name); override != "" {
+		return override
+	}
+
+	name = strings.NewReplacer("_", " ", "-", " ").Replace(name)
+	name = strings.Join(strings.Fields(name), " ")
+	if name == "" {
+		return "Unknown Publication"
+	}
+
+	if segmented := segmentPublicationToken(name); segmented != "" {
+		return segmented
+	}
+
+	return titleCasePublicationPhrase(name)
+}
+
+func publicationOverride(values ...string) string {
+	for _, value := range values {
+		slug := publicationSlug(value)
+		if slug == "" {
+			continue
+		}
+		if override := publicationNameOverrides[slug]; override != "" {
+			return override
+		}
+	}
+	return ""
+}
+
+func publicationSlug(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func publicationHostFromValue(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" || strings.Contains(raw, " ") {
+		return ""
+	}
+
+	if strings.Contains(raw, "://") {
+		if parsed, err := url.Parse(raw); err == nil {
+			return strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
+		}
+	}
+
+	if strings.Contains(raw, "/") {
+		if parsed, err := url.Parse("https://" + raw); err == nil {
+			return strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
+		}
+	}
+
+	if strings.Contains(raw, ".") {
+		return strings.TrimPrefix(strings.ToLower(raw), "www.")
+	}
+
+	return ""
+}
+
+func effectivePublicationDomain(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimPrefix(host, "www.")
+	if host == "" {
+		return ""
+	}
+
+	if domain, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+		return domain
+	}
+	return host
+}
+
+func publicationDomainLabel(host string) string {
+	domain := effectivePublicationDomain(host)
+	if domain == "" {
+		return ""
+	}
+	parts := strings.Split(domain, ".")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
+func normalizePublicationHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimPrefix(host, "www.")
+	if host == "" {
+		return ""
+	}
+
+	if override := publicationOverride(host, effectivePublicationDomain(host), publicationDomainLabel(host)); override != "" {
+		return override
+	}
+
+	label := publicationDomainLabel(host)
+	if label == "" {
+		return ""
+	}
+
+	if segmented := segmentPublicationToken(label); segmented != "" {
+		return segmented
+	}
+
+	return titleCasePublicationPhrase(label)
+}
+
+func titleCasePublicationPhrase(raw string) string {
+	raw = strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
+	if raw == "" {
+		return ""
+	}
+
+	parts := strings.Fields(raw)
+	for i, part := range parts {
+		parts[i] = normalizePublicationWord(part, i, len(parts))
+	}
+	return strings.Join(parts, " ")
+}
+
+func normalizePublicationWord(word string, index, total int) string {
+	runes := []rune(word)
+	start := 0
+	end := len(runes)
+	for start < end && !unicode.IsLetter(runes[start]) && !unicode.IsDigit(runes[start]) {
+		start++
+	}
+	for end > start && !unicode.IsLetter(runes[end-1]) && !unicode.IsDigit(runes[end-1]) {
+		end--
+	}
+	if start >= end {
+		return word
+	}
+
+	prefix := string(runes[:start])
+	core := string(runes[start:end])
+	suffix := string(runes[end:])
+	upperCore := strings.ToUpper(core)
+	lowerCore := strings.ToLower(core)
+
+	switch {
+	case shortPublicationAcronyms[upperCore]:
+		core = upperCore
+	case publicationSmallWords[lowerCore] && index > 0 && index < total-1:
+		core = lowerCore
+	default:
+		core = publicationTitleCaser.String(lowerCore)
+	}
+
+	return prefix + core + suffix
+}
+
+func segmentPublicationToken(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" {
+		return ""
+	}
+
+	if override := publicationOverride(raw); override != "" {
+		return override
+	}
+
+	if strings.ContainsAny(raw, " _-") {
+		cleaned := strings.NewReplacer("_", " ", "-", " ").Replace(raw)
+		return titleCasePublicationPhrase(cleaned)
+	}
+
+	parts := segmentLexiconToken(raw)
+	if len(parts) >= 2 {
+		return titleCasePublicationPhrase(strings.Join(parts, " "))
+	}
+
+	return ""
+}
+
+func segmentLexiconToken(token string) []string {
+	type segmentation struct {
+		parts []string
+		score int
+	}
+
+	token = strings.TrimSpace(strings.ToLower(token))
+	if token == "" {
+		return nil
+	}
+
+	best := make([]segmentation, len(token)+1)
+	reachable := make([]bool, len(token)+1)
+	reachable[0] = true
+
+	for i := 0; i < len(token); i++ {
+		if !reachable[i] {
+			continue
+		}
+		for _, word := range outletLexicon {
+			if !strings.HasPrefix(token[i:], word) {
+				continue
+			}
+			next := i + len(word)
+			candidate := segmentation{
+				parts: append(append([]string(nil), best[i].parts...), word),
+				score: best[i].score + len(word)*len(word) + 1,
+			}
+			if !reachable[next] || candidate.score > best[next].score {
+				best[next] = candidate
+				reachable[next] = true
 			}
 		}
 	}
 
-	return strings.ToUpper(name)
+	if !reachable[len(token)] || len(best[len(token)].parts) < 2 {
+		return nil
+	}
+
+	return best[len(token)].parts
+}
+
+func shouldLookupPublicationMetadata(raw, resolved, link string) bool {
+	if strings.TrimSpace(link) == "" {
+		return false
+	}
+
+	raw = strings.TrimSpace(raw)
+	resolved = strings.TrimSpace(resolved)
+	if raw == "" || resolved == "" || strings.EqualFold(resolved, "Unknown Publication") {
+		return true
+	}
+
+	if publicationHostFromValue(raw) != "" {
+		return true
+	}
+
+	if !strings.Contains(resolved, " ") && !shortPublicationAcronyms[strings.ToUpper(resolved)] && len(resolved) > 4 {
+		return true
+	}
+
+	return false
+}
+
+func buildPublicationLookupTarget(raw, link string) publicationLookupTarget {
+	host := publicationHostFromValue(raw)
+	if host == "" {
+		if parsed, err := url.Parse(strings.TrimSpace(link)); err == nil {
+			host = parsed.Hostname()
+		}
+	}
+	host = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(host)), "www.")
+	if host == "" {
+		return publicationLookupTarget{}
+	}
+
+	key := effectivePublicationDomain(host)
+	if key == "" {
+		key = host
+	}
+
+	return publicationLookupTarget{
+		Key:  key,
+		Link: strings.TrimSpace(link),
+	}
+}
+
+func fetchPublicationMetadataNames(ctx context.Context, lookups map[string]publicationLookupTarget) map[string]string {
+	if len(lookups) == 0 || ctx.Err() != nil {
+		return nil
+	}
+
+	results := make(map[string]string, len(lookups))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, 4)
+
+	for _, target := range lookups {
+		wg.Add(1)
+		go func(target publicationLookupTarget) {
+			defer wg.Done()
+
+			select {
+			case semaphore <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-semaphore }()
+
+			lookupCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+			defer cancel()
+
+			name, err := fetchPublicationNameFromArticle(lookupCtx, target.Link)
+			if err != nil || name == "" {
+				return
+			}
+
+			mu.Lock()
+			results[target.Key] = name
+			mu.Unlock()
+		}(target)
+	}
+
+	wg.Wait()
+	return results
+}
+
+func fetchPublicationNameFromArticle(ctx context.Context, articleURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, articleURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("User-Agent", "PressClips/1.0")
+
+	resp, err := publicationMetadataHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if contentType != "" && !strings.Contains(contentType, "html") {
+		return "", fmt.Errorf("content type %q", contentType)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
+	if err != nil {
+		return "", err
+	}
+
+	return extractPublicationNameFromHTML(body), nil
+}
+
+func extractPublicationNameFromHTML(body []byte) string {
+	doc, err := xhtml.Parse(bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+
+	candidates := map[string]string{}
+	var walk func(*xhtml.Node)
+	walk = func(node *xhtml.Node) {
+		if node.Type == xhtml.ElementNode {
+			switch node.Data {
+			case "meta":
+				source, value := publicationNameFromMetaNode(node)
+				if source != "" && value != "" && candidates[source] == "" {
+					candidates[source] = value
+				}
+			case "script":
+				if candidates["jsonld"] == "" && isJSONLDNode(node) {
+					if value := extractPublicationNameFromJSONLD(nodeText(node)); value != "" {
+						candidates["jsonld"] = value
+					}
+				}
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(doc)
+
+	for _, key := range []string{"og", "application", "publisher", "jsonld"} {
+		if normalized := formatPublicationName(candidates[key], ""); normalized != "" && !strings.EqualFold(normalized, "Unknown Publication") {
+			return normalized
+		}
+	}
+	return ""
+}
+
+func publicationNameFromMetaNode(node *xhtml.Node) (string, string) {
+	property := strings.ToLower(strings.TrimSpace(nodeAttr(node, "property")))
+	name := strings.ToLower(strings.TrimSpace(nodeAttr(node, "name")))
+	itemProp := strings.ToLower(strings.TrimSpace(nodeAttr(node, "itemprop")))
+	content := strings.TrimSpace(nodeAttr(node, "content"))
+	if content == "" {
+		return "", ""
+	}
+
+	switch {
+	case property == "og:site_name":
+		return "og", content
+	case name == "application-name":
+		return "application", content
+	case name == "publisher", itemProp == "publisher":
+		return "publisher", content
+	default:
+		return "", ""
+	}
+}
+
+func isJSONLDNode(node *xhtml.Node) bool {
+	return strings.Contains(strings.ToLower(nodeAttr(node, "type")), "ld+json")
+}
+
+func nodeText(node *xhtml.Node) string {
+	var b strings.Builder
+	var walk func(*xhtml.Node)
+	walk = func(current *xhtml.Node) {
+		if current.Type == xhtml.TextNode {
+			b.WriteString(current.Data)
+		}
+		for child := current.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(node)
+	return b.String()
+}
+
+func nodeAttr(node *xhtml.Node, key string) string {
+	for _, attr := range node.Attr {
+		if strings.EqualFold(attr.Key, key) {
+			return attr.Val
+		}
+	}
+	return ""
+}
+
+func extractPublicationNameFromJSONLD(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return ""
+	}
+
+	return findPublicationNameInJSONLD(value)
+}
+
+func findPublicationNameInJSONLD(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		if name := extractNameFromJSONLDField(typed["publisher"]); name != "" {
+			return name
+		}
+		if name := extractNameFromJSONLDField(typed["isPartOf"]); name != "" {
+			return name
+		}
+		if jsonLDObjectIsPublicationContainer(typed) {
+			if name := jsonLDStringField(typed["name"]); name != "" {
+				return name
+			}
+		}
+		if name := findPublicationNameInJSONLD(typed["@graph"]); name != "" {
+			return name
+		}
+		for _, child := range typed {
+			if name := findPublicationNameInJSONLD(child); name != "" {
+				return name
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if name := findPublicationNameInJSONLD(item); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func extractNameFromJSONLDField(value any) string {
+	switch typed := value.(type) {
+	case map[string]any:
+		if name := jsonLDStringField(typed["name"]); name != "" {
+			return name
+		}
+		return findPublicationNameInJSONLD(typed)
+	case []any:
+		for _, item := range typed {
+			if name := extractNameFromJSONLDField(item); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func jsonLDObjectIsPublicationContainer(obj map[string]any) bool {
+	for _, objectType := range jsonLDTypes(obj["@type"]) {
+		switch objectType {
+		case "website", "organization", "newsmediaorganization", "newspaper", "publication", "periodical":
+			return true
+		}
+	}
+	return false
+}
+
+func jsonLDTypes(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{strings.ToLower(strings.TrimSpace(typed))}
+	case []any:
+		types := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if str, ok := item.(string); ok {
+				types = append(types, strings.ToLower(strings.TrimSpace(str)))
+			}
+		}
+		return types
+	default:
+		return nil
+	}
+}
+
+func jsonLDStringField(value any) string {
+	if str, ok := value.(string); ok {
+		return strings.TrimSpace(str)
+	}
+	return ""
 }
 
 var socialDomains = map[string]bool{
@@ -752,11 +1549,9 @@ func normalizeText(s string) string {
 func renderResultsFragment(results []clip, query string, window searchWindow, errs []string, stats []providerResult, diag searchDiagnostics) string {
 	var b strings.Builder
 
-	b.WriteString(renderProviderDebugFragment(query, window, stats))
-
 	if len(results) == 0 {
 		b.WriteString(renderDiagnosticsFragment(errs, stats, diag, window))
-		b.WriteString(fmt.Sprintf(`<p class="empty-state">No clips found for <strong>%s</strong> in the %s.</p>`, html.EscapeString(query), html.EscapeString(window.Label)))
+		b.WriteString(fmt.Sprintf(`<p class="empty-state">No clips found for <strong>%s</strong> in the %s.</p>`, stdhtml.EscapeString(query), stdhtml.EscapeString(window.Label)))
 		return b.String()
 	}
 
@@ -769,60 +1564,30 @@ func renderResultsFragment(results []clip, query string, window searchWindow, er
 			published = row.PublishedAt.Local().Format("January 2, 2006")
 		}
 
-		pub := formatPublicationName(row.Publication)
+		pub := formatPublicationName(row.Publication, row.Link)
 
 		b.WriteString(`<tr data-clip-row><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000;">`)
 		b.WriteString(`<div class="clip-row-card">`)
 		b.WriteString(`<button class="clip-remove-button" type="button" data-delete-clip data-copy-strip aria-label="Remove this result from the list" title="Remove this result"><span aria-hidden="true">&times;</span></button>`)
 		b.WriteString(`<div style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000;">`)
-		b.WriteString(html.EscapeString(pub))
+		b.WriteString(`<strong style="font-weight:700;">`)
+		b.WriteString(stdhtml.EscapeString(pub))
+		b.WriteString(`</strong>`)
 		b.WriteString(` <span style="font-weight:400;">(`)
-		b.WriteString(html.EscapeString(published))
+		b.WriteString(stdhtml.EscapeString(published))
 		b.WriteString(`)</span></div>`)
 		b.WriteString(`<div style="padding-top:2px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; font-weight:400; color:#000000;">`)
-		b.WriteString(html.EscapeString(cleanTitle(row.Title)))
+		b.WriteString(stdhtml.EscapeString(cleanTitle(row.Title)))
 		b.WriteString(`</div>`)
 		b.WriteString(`<div style="padding-top:2px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#6fa8dc;"><a href="`)
-		b.WriteString(html.EscapeString(row.Link))
+		b.WriteString(stdhtml.EscapeString(row.Link))
 		b.WriteString(`" target="_blank" rel="noopener noreferrer" style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#6fa8dc; text-decoration:underline;">`)
-		b.WriteString(html.EscapeString(row.Link))
+		b.WriteString(stdhtml.EscapeString(row.Link))
 		b.WriteString(`</a></div></div></td></tr>`)
 	}
 	b.WriteString(`</table></div></div>`)
 
 	return b.String()
-}
-
-func renderProviderDebugFragment(query string, window searchWindow, stats []providerResult) string {
-	payload := providerDebugPayload{
-		Query:     query,
-		Window:    window.Value,
-		Generated: time.Now().UTC().Format(time.RFC3339),
-		Providers: make([]providerDebugItem, 0, len(stats)),
-	}
-
-	for _, stat := range stats {
-		item := providerDebugItem{
-			Name:        stat.Name,
-			DurationMS:  stat.DurationMS,
-			RawCount:    stat.RawCount,
-			RecentCount: stat.RecentCount,
-			Request:     stat.DebugRequest,
-			Response:    stat.DebugResponse,
-		}
-		if stat.Err != nil {
-			item.Error = stat.Err.Error()
-		}
-		payload.Providers = append(payload.Providers, item)
-	}
-
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("provider debug marshal failed: %v", err)
-		return ""
-	}
-
-	return `<script type="application/json" data-provider-debug>` + string(encoded) + `</script>`
 }
 
 func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searchDiagnostics, window searchWindow) string {
@@ -833,7 +1598,7 @@ func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searc
 		b.WriteString(`<p class="warning">Partial results:</p><ul class="diag">`)
 		for _, errMsg := range errs {
 			b.WriteString(`<li>`)
-			b.WriteString(html.EscapeString(errMsg))
+			b.WriteString(stdhtml.EscapeString(errMsg))
 			b.WriteString(`</li>`)
 		}
 		b.WriteString(`</ul>`)
@@ -842,7 +1607,7 @@ func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searc
 	b.WriteString(`<p class="count">Overall widdling:</p><ul class="diag">`)
 	overallLine := fmt.Sprintf("All providers -> raw: %d -> dated within %s: %d -> normalized: %d -> unique URLs: %d -> name match: %d -> official outlets: %d -> English/final: %d", diag.RawCount, window.Label, diag.RecentCount, diag.Normalized, diag.UniqueURLs, diag.QueryMatched, diag.OutletAllowed, diag.EnglishKept)
 	b.WriteString(`<li>`)
-	b.WriteString(html.EscapeString(overallLine))
+	b.WriteString(stdhtml.EscapeString(overallLine))
 	b.WriteString(`</li></ul>`)
 
 	b.WriteString(`<p class="count">Latest provider run:</p><ul class="diag">`)
@@ -852,7 +1617,7 @@ func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searc
 			line = fmt.Sprintf("%s -> error: %s", s.Name, s.Err.Error())
 		}
 		b.WriteString(`<li>`)
-		b.WriteString(html.EscapeString(line))
+		b.WriteString(stdhtml.EscapeString(line))
 		b.WriteString(`</li>`)
 	}
 	b.WriteString(`</ul></div>`)
@@ -860,14 +1625,14 @@ func renderDiagnosticsFragment(errs []string, stats []providerResult, diag searc
 	return b.String()
 }
 
-func searchBrave(ctx context.Context, clientName string, since time.Time, window searchWindow, apiKey string) providerResult {
+func searchBrave(ctx context.Context, searchID, clientName string, since time.Time, window searchWindow, apiKey string) providerResult {
 	started := time.Now()
 	res := providerResult{Name: "Brave"}
 
 	u, err := url.Parse("https://api.search.brave.com/res/v1/news/search")
 	if err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 
 	q := u.Query()
@@ -877,7 +1642,7 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, window
 	q.Set("count", "50")
 	q.Set("extra_snippets", "true")
 	u.RawQuery = q.Encode()
-	res.DebugRequest = map[string]any{
+	requestPayload := map[string]any{
 		"method": "GET",
 		"url":    u.String(),
 		"query": map[string]any{
@@ -888,13 +1653,12 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, window
 			"extra_snippets": q.Get("extra_snippets"),
 		},
 	}
-
-	log.Printf("provider=Brave request url=%s", u.String())
+	logSearchBlock(searchID, "Brave upstream request", prettyJSONForLog(requestPayload))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Subscription-Token", apiKey)
@@ -902,20 +1666,20 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, window
 	httpResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 	defer httpResp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
 	if err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
-	res.DebugResponse = parseJSONDebugValue(body)
+	logSearchBlock(searchID, fmt.Sprintf("Brave upstream response status=%d", httpResp.StatusCode), prettyRawJSONForLog(body))
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		res.Err = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(body)))
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 
 	type braveResponse struct {
@@ -934,7 +1698,7 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, window
 	var payload braveResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 
 	res.RawCount = len(payload.Results)
@@ -969,10 +1733,12 @@ func searchBrave(ctx context.Context, clientName string, since time.Time, window
 
 	res.Clips = clipped
 	res.RecentCount = recent
-	return finalizeProviderResult(res, started)
+	logSearchf(searchID, "Brave normalized raw=%d dated_within_window=%d normalized=%d", res.RawCount, res.RecentCount, len(res.Clips))
+	logSearchBlock(searchID, "Brave post-processing payload", prettyJSONForLog(clipLogEntries(res.Clips)))
+	return finalizeProviderResult(searchID, res, started)
 }
 
-func searchExa(ctx context.Context, clientName string, since time.Time, apiKey string) providerResult {
+func searchExa(ctx context.Context, searchID, clientName string, since time.Time, apiKey string) providerResult {
 	started := time.Now()
 	res := providerResult{Name: "Exa"}
 
@@ -988,24 +1754,23 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 			},
 		},
 	}
-	res.DebugRequest = map[string]any{
+	requestPayload := map[string]any{
 		"method": "POST",
 		"url":    "https://api.exa.ai/search",
 		"body":   payload,
 	}
+	logSearchBlock(searchID, "Exa upstream request", prettyJSONForLog(requestPayload))
 
 	body, err := json.Marshal(payload)
 	if err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
-
-	log.Printf("provider=Exa request endpoint=https://api.exa.ai/search payload=%s", truncateForLog(string(body), 512))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.exa.ai/search", bytes.NewReader(body))
 	if err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", apiKey)
@@ -1013,20 +1778,20 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 	httpResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 	defer httpResp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 2<<20))
 	if err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
-	res.DebugResponse = parseJSONDebugValue(respBody)
+	logSearchBlock(searchID, fmt.Sprintf("Exa upstream response status=%d", httpResp.StatusCode), prettyRawJSONForLog(respBody))
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		res.Err = fmt.Errorf("api error (%d): %s", httpResp.StatusCode, strings.TrimSpace(string(respBody)))
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 
 	type exaResponse struct {
@@ -1043,7 +1808,7 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 	var response exaResponse
 	if err := json.Unmarshal(respBody, &response); err != nil {
 		res.Err = err
-		return finalizeProviderResult(res, started)
+		return finalizeProviderResult(searchID, res, started)
 	}
 
 	res.RawCount = len(response.Results)
@@ -1078,34 +1843,19 @@ func searchExa(ctx context.Context, clientName string, since time.Time, apiKey s
 
 	res.Clips = clipped
 	res.RecentCount = recent
-	return finalizeProviderResult(res, started)
+	logSearchf(searchID, "Exa normalized raw=%d dated_within_window=%d normalized=%d", res.RawCount, res.RecentCount, len(res.Clips))
+	logSearchBlock(searchID, "Exa post-processing payload", prettyJSONForLog(clipLogEntries(res.Clips)))
+	return finalizeProviderResult(searchID, res, started)
 }
 
-func finalizeProviderResult(res providerResult, started time.Time) providerResult {
+func finalizeProviderResult(searchID string, res providerResult, started time.Time) providerResult {
 	res.DurationMS = time.Since(started).Milliseconds()
 	if res.Err != nil {
-		log.Printf("provider=%s status=error latency_ms=%d error=%s", res.Name, res.DurationMS, res.Err.Error())
+		logSearchf(searchID, "provider=%s status=error latency_ms=%d error=%s", res.Name, res.DurationMS, res.Err.Error())
 	} else {
-		log.Printf("provider=%s status=ok latency_ms=%d raw=%d dated_within_window=%d normalized=%d", res.Name, res.DurationMS, res.RawCount, res.RecentCount, len(res.Clips))
+		logSearchf(searchID, "provider=%s status=ok latency_ms=%d raw=%d dated_within_window=%d normalized=%d", res.Name, res.DurationMS, res.RawCount, res.RecentCount, len(res.Clips))
 	}
 	return res
-}
-
-func truncateForLog(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
-}
-
-func parseJSONDebugValue(raw []byte) any {
-	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return map[string]any{
-			"raw": string(raw),
-		}
-	}
-	return value
 }
 
 func firstNonEmpty(values ...string) string {
