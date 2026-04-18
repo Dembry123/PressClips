@@ -1985,13 +1985,8 @@ func searchExa(ctx context.Context, searchID, clientName string, since time.Time
 			recent++
 		}
 
-		pub := strings.TrimSpace(item.Author)
-		if pub == "" {
-			pub = domainFromURL(link)
-		}
-
 		clipped = append(clipped, clip{
-			Publication: pub,
+			Publication: domainFromURL(link),
 			PublishedAt: published,
 			Title:       fallback(item.Title, "Untitled"),
 			Link:        link,
