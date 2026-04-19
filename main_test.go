@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestFormatPublicationName(t *testing.T) {
 	t.Parallel()
@@ -79,5 +84,32 @@ func TestExtractPublicationNameFromHTML(t *testing.T) {
 				t.Fatalf("extractPublicationNameFromHTML() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestResolveClipPublicationsUsesMetadataForSurvivingResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><meta property="og:site_name" content="Example News"></head><body></body></html>`))
+	}))
+	defer server.Close()
+
+	originalClient := publicationMetadataHTTPClient
+	publicationMetadataHTTPClient = server.Client()
+	t.Cleanup(func() {
+		publicationMetadataHTTPClient = originalClient
+	})
+
+	items := []clip{{
+		Publication: "Random Author",
+		Link:        server.URL + "/story",
+	}}
+
+	got := resolveClipPublications(context.Background(), items)
+	if len(got) != 1 {
+		t.Fatalf("resolveClipPublications() length = %d, want 1", len(got))
+	}
+	if got[0].Publication != "Example News" {
+		t.Fatalf("resolveClipPublications() publication = %q, want %q", got[0].Publication, "Example News")
 	}
 }

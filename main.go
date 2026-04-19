@@ -924,7 +924,7 @@ func filterClipsByQuery(items []clip, query string) []clip {
 
 	filtered := make([]clip, 0, len(items))
 	for _, c := range items {
-		haystack := normalizeText(strings.Join([]string{c.Title, c.Snippet, c.SearchText, c.Link, c.Publication}, " "))
+		haystack := normalizeText(strings.Join([]string{c.Title, c.Snippet, c.SearchText, c.Link}, " "))
 		if haystack == "" {
 			continue
 		}
@@ -1006,14 +1006,7 @@ func resolveClipPublications(ctx context.Context, items []clip) []clip {
 	lookupTargets := make(map[string]publicationLookupTarget)
 
 	for i := range resolved {
-		rawPublication := firstNonEmpty(resolved[i].Publication, domainFromURL(resolved[i].Link))
-		resolved[i].Publication = formatPublicationName(rawPublication, resolved[i].Link)
-
-		if !shouldLookupPublicationMetadata(rawPublication, resolved[i].Publication, resolved[i].Link) {
-			continue
-		}
-
-		target := buildPublicationLookupTarget(rawPublication, resolved[i].Link)
+		target := buildPublicationLookupTarget(resolved[i].Link)
 		if target.Key == "" || target.Link == "" {
 			continue
 		}
@@ -1023,18 +1016,16 @@ func resolveClipPublications(ctx context.Context, items []clip) []clip {
 	}
 
 	metadataNames := fetchPublicationMetadataNames(ctx, lookupTargets)
-	if len(metadataNames) == 0 {
-		return resolved
-	}
 
 	for i := range resolved {
-		target := buildPublicationLookupTarget(items[i].Publication, resolved[i].Link)
-		if target.Key == "" {
-			continue
-		}
+		target := buildPublicationLookupTarget(resolved[i].Link)
 		if metadataName := metadataNames[target.Key]; metadataName != "" {
 			resolved[i].Publication = metadataName
+			continue
 		}
+
+		rawPublication := firstNonEmpty(items[i].Publication, domainFromURL(resolved[i].Link))
+		resolved[i].Publication = formatPublicationName(rawPublication, resolved[i].Link)
 	}
 
 	return resolved
@@ -1284,34 +1275,10 @@ func segmentLexiconToken(token string) []string {
 	return best[len(token)].parts
 }
 
-func shouldLookupPublicationMetadata(raw, resolved, link string) bool {
-	if strings.TrimSpace(link) == "" {
-		return false
-	}
-
-	raw = strings.TrimSpace(raw)
-	resolved = strings.TrimSpace(resolved)
-	if raw == "" || resolved == "" || strings.EqualFold(resolved, "Unknown Publication") {
-		return true
-	}
-
-	if publicationHostFromValue(raw) != "" {
-		return true
-	}
-
-	if !strings.Contains(resolved, " ") && !shortPublicationAcronyms[strings.ToUpper(resolved)] && len(resolved) > 4 {
-		return true
-	}
-
-	return false
-}
-
-func buildPublicationLookupTarget(raw, link string) publicationLookupTarget {
-	host := publicationHostFromValue(raw)
-	if host == "" {
-		if parsed, err := url.Parse(strings.TrimSpace(link)); err == nil {
-			host = parsed.Hostname()
-		}
+func buildPublicationLookupTarget(link string) publicationLookupTarget {
+	host := ""
+	if parsed, err := url.Parse(strings.TrimSpace(link)); err == nil {
+		host = parsed.Hostname()
 	}
 	host = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(host)), "www.")
 	if host == "" {
