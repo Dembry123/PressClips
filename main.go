@@ -80,6 +80,7 @@ var publicationNameOverrides = map[string]string{
 	"apnews":         "AP News",
 	"cbsnews":        "CBS News",
 	"dailymail":      "Daily Mail",
+	"mailonline":     "Daily Mail",
 	"eastbaytimes":   "East Bay Times",
 	"eonline":        "E! News",
 	"foxnews":        "Fox News",

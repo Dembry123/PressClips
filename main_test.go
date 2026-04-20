@@ -37,6 +37,11 @@ func TestFormatPublicationName(t *testing.T) {
 			want: "Daily Mail",
 		},
 		{
+			name: "metadata alias override",
+			raw:  "Mail Online",
+			want: "Daily Mail",
+		},
+		{
 			name: "fallback to link host",
 			link: "https://www.foxnews.com/entertainment/story",
 			want: "Fox News",
@@ -72,6 +77,11 @@ func TestExtractPublicationNameFromHTML(t *testing.T) {
 			name: "jsonld publisher",
 			html: `<!doctype html><html><head><script type="application/ld+json">{"@context":"https://schema.org","@type":"NewsArticle","publisher":{"@type":"Organization","name":"East Bay Times"}}</script></head><body></body></html>`,
 			want: "East Bay Times",
+		},
+		{
+			name: "publisher alias override",
+			html: `<!doctype html><html><head><meta name="publisher" content="Mail Online"></head><body></body></html>`,
+			want: "Daily Mail",
 		},
 	}
 
