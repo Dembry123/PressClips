@@ -69,6 +69,14 @@ type publicationLookupTarget struct {
 	Link string
 }
 
+type publicationLookupOutcome struct {
+	Name        string
+	StatusCode  int
+	ContentType string
+	Candidates  map[string]string
+	ParseError  string
+}
+
 var publicationTitleCaser = cases.Title(language.English)
 
 const (
@@ -416,7 +424,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	diag.EnglishKept = len(unique)
 	logClipStage(searchID, "after filterNonEnglish", unique)
 	publicationCtx, publicationCancel := context.WithTimeout(r.Context(), publicationResolutionTimeout)
-	unique = resolveClipPublications(publicationCtx, unique)
+	unique = resolveClipPublications(publicationCtx, searchID, unique)
 	publicationCancel()
 	logClipStage(searchID, "after resolveClipPublications", unique)
 	logRenderedResults(searchID, unique)
@@ -1003,7 +1011,7 @@ func buildBraveBodyAwareQuery(clientName string) string {
 	return "inpage:" + quoteForSearch(clientName)
 }
 
-func resolveClipPublications(ctx context.Context, items []clip) []clip {
+func resolveClipPublications(ctx context.Context, searchID string, items []clip) []clip {
 	if len(items) == 0 {
 		return items
 	}
@@ -1021,7 +1029,7 @@ func resolveClipPublications(ctx context.Context, items []clip) []clip {
 		}
 	}
 
-	metadataNames := fetchPublicationMetadataNames(ctx, lookupTargets)
+	metadataNames := fetchPublicationMetadataNames(ctx, searchID, lookupTargets)
 
 	for i := range resolved {
 		target := buildPublicationLookupTarget(resolved[i].Link)
@@ -1302,7 +1310,7 @@ func buildPublicationLookupTarget(link string) publicationLookupTarget {
 	}
 }
 
-func fetchPublicationMetadataNames(ctx context.Context, lookups map[string]publicationLookupTarget) map[string]string {
+func fetchPublicationMetadataNames(ctx context.Context, searchID string, lookups map[string]publicationLookupTarget) map[string]string {
 	if len(lookups) == 0 || ctx.Err() != nil {
 		return nil
 	}
@@ -1316,10 +1324,12 @@ func fetchPublicationMetadataNames(ctx context.Context, lookups map[string]publi
 		wg.Add(1)
 		go func(target publicationLookupTarget) {
 			defer wg.Done()
+			start := time.Now()
 
 			select {
 			case semaphore <- struct{}{}:
 			case <-ctx.Done():
+				logPublicationLookupResult(searchID, target, publicationLookupOutcome{}, ctx.Err(), time.Since(start))
 				return
 			}
 			defer func() { <-semaphore }()
@@ -1327,13 +1337,14 @@ func fetchPublicationMetadataNames(ctx context.Context, lookups map[string]publi
 			lookupCtx, cancel := context.WithTimeout(ctx, publicationMetadataLookupTimeout)
 			defer cancel()
 
-			name, err := fetchPublicationNameFromArticle(lookupCtx, target.Link)
-			if err != nil || name == "" {
+			outcome, err := fetchPublicationNameFromArticle(lookupCtx, target.Link)
+			logPublicationLookupResult(searchID, target, outcome, err, time.Since(start))
+			if err != nil || outcome.Name == "" {
 				return
 			}
 
 			mu.Lock()
-			results[target.Key] = name
+			results[target.Key] = outcome.Name
 			mu.Unlock()
 		}(target)
 	}
@@ -1342,10 +1353,10 @@ func fetchPublicationMetadataNames(ctx context.Context, lookups map[string]publi
 	return results
 }
 
-func fetchPublicationNameFromArticle(ctx context.Context, articleURL string) (string, error) {
+func fetchPublicationNameFromArticle(ctx context.Context, articleURL string) (publicationLookupOutcome, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, articleURL, nil)
 	if err != nil {
-		return "", err
+		return publicationLookupOutcome{}, err
 	}
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
@@ -1353,31 +1364,40 @@ func fetchPublicationNameFromArticle(ctx context.Context, articleURL string) (st
 
 	resp, err := publicationMetadataHTTPClient.Do(req)
 	if err != nil {
-		return "", err
+		return publicationLookupOutcome{}, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("status %d", resp.StatusCode)
+	outcome := publicationLookupOutcome{
+		StatusCode:  resp.StatusCode,
+		ContentType: strings.ToLower(resp.Header.Get("Content-Type")),
 	}
 
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	if contentType != "" && !strings.Contains(contentType, "html") {
-		return "", fmt.Errorf("content type %q", contentType)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return outcome, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	if outcome.ContentType != "" && !strings.Contains(outcome.ContentType, "html") {
+		return outcome, fmt.Errorf("content type %q", outcome.ContentType)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
 	if err != nil {
-		return "", err
+		return outcome, err
 	}
 
-	return extractPublicationNameFromHTML(body), nil
+	outcome.Name, outcome.Candidates, err = extractPublicationNameFromHTML(body)
+	if err != nil {
+		outcome.ParseError = err.Error()
+	}
+
+	return outcome, nil
 }
 
-func extractPublicationNameFromHTML(body []byte) string {
+func extractPublicationNameFromHTML(body []byte) (string, map[string]string, error) {
 	doc, err := xhtml.Parse(bytes.NewReader(body))
 	if err != nil {
-		return ""
+		return "", nil, err
 	}
 
 	candidates := map[string]string{}
@@ -1406,10 +1426,65 @@ func extractPublicationNameFromHTML(body []byte) string {
 
 	for _, key := range []string{"og", "application", "publisher", "jsonld"} {
 		if normalized := formatPublicationName(candidates[key], ""); normalized != "" && !strings.EqualFold(normalized, "Unknown Publication") {
-			return normalized
+			return normalized, candidates, nil
 		}
 	}
-	return ""
+	return "", candidates, nil
+}
+
+func logPublicationLookupResult(searchID string, target publicationLookupTarget, outcome publicationLookupOutcome, err error, duration time.Duration) {
+	fields := map[string]any{
+		"lookup_key":   target.Key,
+		"link":         target.Link,
+		"duration_ms":  duration.Milliseconds(),
+		"status":       publicationLookupStatus(outcome, err),
+		"status_code":  outcome.StatusCode,
+		"content_type": outcome.ContentType,
+	}
+	if outcome.Name != "" {
+		fields["publication"] = outcome.Name
+	}
+	if len(outcome.Candidates) > 0 {
+		fields["metadata_candidates"] = outcome.Candidates
+	}
+	if outcome.ParseError != "" {
+		fields["parse_error"] = outcome.ParseError
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	logSearchEvent(searchID, "publication_lookup_result", fields)
+}
+
+func publicationLookupStatus(outcome publicationLookupOutcome, err error) string {
+	switch {
+	case err == nil && outcome.Name != "":
+		return "ok"
+	case err == nil && outcome.ParseError != "":
+		return "parse_error"
+	case err == nil:
+		return "no_metadata_name"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	if outcome.StatusCode != 0 {
+		return "http_status"
+	}
+	if outcome.ContentType != "" && !strings.Contains(outcome.ContentType, "html") {
+		return "non_html"
+	}
+	if outcome.ParseError != "" {
+		return "parse_error"
+	}
+
+	return "error"
 }
 
 func publicationNameFromMetaNode(node *xhtml.Node) (string, string) {

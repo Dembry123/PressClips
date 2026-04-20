@@ -90,7 +90,11 @@ func TestExtractPublicationNameFromHTML(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := extractPublicationNameFromHTML([]byte(test.html)); got != test.want {
+			got, _, err := extractPublicationNameFromHTML([]byte(test.html))
+			if err != nil {
+				t.Fatalf("extractPublicationNameFromHTML() error = %v", err)
+			}
+			if got != test.want {
 				t.Fatalf("extractPublicationNameFromHTML() = %q, want %q", got, test.want)
 			}
 		})
@@ -115,7 +119,7 @@ func TestResolveClipPublicationsUsesMetadataForSurvivingResults(t *testing.T) {
 		Link:        server.URL + "/story",
 	}}
 
-	got := resolveClipPublications(context.Background(), items)
+	got := resolveClipPublications(context.Background(), "test-search", items)
 	if len(got) != 1 {
 		t.Fatalf("resolveClipPublications() length = %d, want 1", len(got))
 	}
