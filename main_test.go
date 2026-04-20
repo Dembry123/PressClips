@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -40,6 +41,16 @@ func TestFormatPublicationName(t *testing.T) {
 			name: "metadata alias override",
 			raw:  "Mail Online",
 			want: "Daily Mail",
+		},
+		{
+			name: "the sun ireland domain override",
+			raw:  "thesun.ie",
+			want: "The Irish Sun",
+		},
+		{
+			name: "the irish sun metadata override",
+			raw:  "The Irish Sun",
+			want: "The Irish Sun",
 		},
 		{
 			name: "fallback to link host",
@@ -125,5 +136,40 @@ func TestResolveClipPublicationsUsesMetadataForSurvivingResults(t *testing.T) {
 	}
 	if got[0].Publication != "Example News" {
 		t.Fatalf("resolveClipPublications() publication = %q, want %q", got[0].Publication, "Example News")
+	}
+}
+
+func TestFetchPublicationNameFromArticleIncludesHTMLSnippetWhenMetadataMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html>
+<html>
+  <head>
+    <title>Fallback Case</title>
+    <meta charset="utf-8">
+  </head>
+  <body><h1>No publication metadata here</h1></body>
+</html>`))
+	}))
+	defer server.Close()
+
+	originalClient := publicationMetadataHTTPClient
+	publicationMetadataHTTPClient = server.Client()
+	t.Cleanup(func() {
+		publicationMetadataHTTPClient = originalClient
+	})
+
+	outcome, err := fetchPublicationNameFromArticle(context.Background(), server.URL+"/story")
+	if err != nil {
+		t.Fatalf("fetchPublicationNameFromArticle() error = %v", err)
+	}
+	if outcome.Name != "" {
+		t.Fatalf("fetchPublicationNameFromArticle() name = %q, want empty", outcome.Name)
+	}
+	if outcome.HTMLSnippet == "" {
+		t.Fatal("fetchPublicationNameFromArticle() html snippet = empty, want preview")
+	}
+	if !strings.Contains(outcome.HTMLSnippet, "<head>") {
+		t.Fatalf("fetchPublicationNameFromArticle() html snippet = %q, want head preview", outcome.HTMLSnippet)
 	}
 }

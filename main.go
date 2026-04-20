@@ -75,6 +75,7 @@ type publicationLookupOutcome struct {
 	ContentType string
 	Candidates  map[string]string
 	ParseError  string
+	HTMLSnippet string
 }
 
 var publicationTitleCaser = cases.Title(language.English)
@@ -103,6 +104,8 @@ var publicationNameOverrides = map[string]string{
 	"nytimes":        "The New York Times",
 	"ok":             "OK!",
 	"okmagazine":     "OK! Magazine",
+	"theirishsun":    "The Irish Sun",
+	"thesunie":       "The Irish Sun",
 	"tmz":            "TMZ",
 	"usatoday":       "USA Today",
 	"washingtonpost": "The Washington Post",
@@ -1402,6 +1405,9 @@ func fetchPublicationNameFromArticle(ctx context.Context, articleURL string) (pu
 	if err != nil {
 		outcome.ParseError = err.Error()
 	}
+	if outcome.Name == "" || outcome.ParseError != "" {
+		outcome.HTMLSnippet = htmlSnippetForLog(body)
+	}
 
 	return outcome, nil
 }
@@ -1444,6 +1450,28 @@ func extractPublicationNameFromHTML(body []byte) (string, map[string]string, err
 	return "", candidates, nil
 }
 
+func htmlSnippetForLog(body []byte) string {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return ""
+	}
+
+	start := 0
+	if headStart := bytes.Index(bytes.ToLower(body), []byte("<head")); headStart >= 0 {
+		start = headStart
+	}
+
+	end := len(body)
+	if headEnd := bytes.Index(bytes.ToLower(body[start:]), []byte("</head>")); headEnd >= 0 {
+		end = start + headEnd + len("</head>")
+	} else if maxEnd := start + 2048; maxEnd < end {
+		end = maxEnd
+	}
+
+	snippet := strings.Join(strings.Fields(string(body[start:end])), " ")
+	return truncateLogString(snippet, 1600)
+}
+
 func publicationLookupLogFields(target publicationLookupTarget, outcome publicationLookupOutcome, err error, duration time.Duration) map[string]any {
 	fields := map[string]any{
 		"lookup_key":   target.Key,
@@ -1461,6 +1489,9 @@ func publicationLookupLogFields(target publicationLookupTarget, outcome publicat
 	}
 	if outcome.ParseError != "" {
 		fields["parse_error"] = outcome.ParseError
+	}
+	if outcome.HTMLSnippet != "" {
+		fields["html_snippet"] = outcome.HTMLSnippet
 	}
 	if err != nil {
 		fields["error"] = err.Error()

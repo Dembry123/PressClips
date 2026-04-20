@@ -30,6 +30,9 @@ pressclips
 # env file
 .env
 
+# Local log captures
+log-captures/
+
 # Editor/IDE
 # .idea/
 # .vscode/
