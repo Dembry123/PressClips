@@ -71,8 +71,13 @@ type publicationLookupTarget struct {
 
 var publicationTitleCaser = cases.Title(language.English)
 
+const (
+	publicationMetadataLookupTimeout = 5 * time.Second
+	publicationResolutionTimeout     = 12 * time.Second
+)
+
 var publicationMetadataHTTPClient = &http.Client{
-	Timeout: 2500 * time.Millisecond,
+	Timeout: publicationMetadataLookupTimeout,
 }
 
 var publicationNameOverrides = map[string]string{
@@ -410,7 +415,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	unique = filterNonEnglish(unique)
 	diag.EnglishKept = len(unique)
 	logClipStage(searchID, "after filterNonEnglish", unique)
-	publicationCtx, publicationCancel := context.WithTimeout(r.Context(), 6*time.Second)
+	publicationCtx, publicationCancel := context.WithTimeout(r.Context(), publicationResolutionTimeout)
 	unique = resolveClipPublications(publicationCtx, unique)
 	publicationCancel()
 	logClipStage(searchID, "after resolveClipPublications", unique)
@@ -1319,7 +1324,7 @@ func fetchPublicationMetadataNames(ctx context.Context, lookups map[string]publi
 			}
 			defer func() { <-semaphore }()
 
-			lookupCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+			lookupCtx, cancel := context.WithTimeout(ctx, publicationMetadataLookupTimeout)
 			defer cancel()
 
 			name, err := fetchPublicationNameFromArticle(lookupCtx, target.Link)

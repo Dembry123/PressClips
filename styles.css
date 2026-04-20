@@ -256,12 +256,33 @@ button:active {
   letter-spacing: 0.01em;
 }
 
+.results-loading::after {
+  content: "...";
+  display: inline-block;
+  width: 0;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+
 #results-loading.htmx-request {
   display: block;
 }
 
+#results-loading.htmx-request::after {
+  animation: loadingDots 1.2s steps(4, end) infinite;
+}
+
 #results-loading.htmx-request + .results {
   opacity: 0.5;
+}
+
+@keyframes loadingDots {
+  0% {
+    width: 0;
+  }
+  100% {
+    width: 3ch;
+  }
 }
 
 .count {
