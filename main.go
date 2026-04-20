@@ -1316,6 +1316,7 @@ func fetchPublicationMetadataNames(ctx context.Context, searchID string, lookups
 	}
 
 	results := make(map[string]string, len(lookups))
+	lookupEvents := make([]map[string]any, 0, len(lookups))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, 4)
@@ -1329,7 +1330,11 @@ func fetchPublicationMetadataNames(ctx context.Context, searchID string, lookups
 			select {
 			case semaphore <- struct{}{}:
 			case <-ctx.Done():
-				logPublicationLookupResult(searchID, target, publicationLookupOutcome{}, ctx.Err(), time.Since(start))
+				eventFields := publicationLookupLogFields(target, publicationLookupOutcome{}, ctx.Err(), time.Since(start))
+				logSearchEvent(searchID, "publication_lookup_result", eventFields)
+				mu.Lock()
+				lookupEvents = append(lookupEvents, eventFields)
+				mu.Unlock()
 				return
 			}
 			defer func() { <-semaphore }()
@@ -1338,18 +1343,25 @@ func fetchPublicationMetadataNames(ctx context.Context, searchID string, lookups
 			defer cancel()
 
 			outcome, err := fetchPublicationNameFromArticle(lookupCtx, target.Link)
-			logPublicationLookupResult(searchID, target, outcome, err, time.Since(start))
+			eventFields := publicationLookupLogFields(target, outcome, err, time.Since(start))
+			logSearchEvent(searchID, "publication_lookup_result", eventFields)
+			mu.Lock()
+			lookupEvents = append(lookupEvents, eventFields)
+			if err == nil && outcome.Name != "" {
+				results[target.Key] = outcome.Name
+			}
+			mu.Unlock()
 			if err != nil || outcome.Name == "" {
 				return
 			}
-
-			mu.Lock()
-			results[target.Key] = outcome.Name
-			mu.Unlock()
 		}(target)
 	}
 
 	wg.Wait()
+	logSearchEvent(searchID, "publication_lookup_summary", map[string]any{
+		"lookup_target_count": len(lookups),
+		"lookup_results":      lookupEvents,
+	})
 	return results
 }
 
@@ -1432,7 +1444,7 @@ func extractPublicationNameFromHTML(body []byte) (string, map[string]string, err
 	return "", candidates, nil
 }
 
-func logPublicationLookupResult(searchID string, target publicationLookupTarget, outcome publicationLookupOutcome, err error, duration time.Duration) {
+func publicationLookupLogFields(target publicationLookupTarget, outcome publicationLookupOutcome, err error, duration time.Duration) map[string]any {
 	fields := map[string]any{
 		"lookup_key":   target.Key,
 		"link":         target.Link,
@@ -1453,7 +1465,7 @@ func logPublicationLookupResult(searchID string, target publicationLookupTarget,
 	if err != nil {
 		fields["error"] = err.Error()
 	}
-	logSearchEvent(searchID, "publication_lookup_result", fields)
+	return fields
 }
 
 func publicationLookupStatus(outcome publicationLookupOutcome, err error) string {
