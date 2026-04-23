@@ -228,6 +228,133 @@
           .join("\n");
       }
 
+      function createClipboardTextLine(text) {
+        const line = document.createElement("div");
+        line.textContent = text;
+        return line;
+      }
+
+      function buildClipboardTextBlock(text) {
+        const value = text.trim();
+        if (!value) {
+          return null;
+        }
+
+        const block = document.createElement("div");
+        block.appendChild(createClipboardTextLine(value));
+        return block;
+      }
+
+      function buildClipRowHTML(row) {
+        const card = row.querySelector(".clip-row-card");
+        if (!card) {
+          return buildClipboardTextBlock(row.textContent ?? "");
+        }
+
+        const lines = Array.from(card.children)
+          .filter((child) => child.tagName !== "BUTTON")
+          .map((child) => {
+            const value = (child.textContent ?? "").trim();
+            if (!value) {
+              return null;
+            }
+
+            const line = document.createElement("div");
+            const link = child.querySelector("a[href]");
+            if (link) {
+              const anchor = document.createElement("a");
+              anchor.href = link.href;
+              anchor.textContent = (link.textContent ?? "").trim();
+              line.appendChild(anchor);
+              return line;
+            }
+
+            const strongText = child.querySelector("strong")?.textContent?.trim();
+            if (strongText) {
+              const strong = document.createElement("strong");
+              strong.textContent = strongText;
+              line.appendChild(strong);
+
+              const remainder = value.slice(strongText.length).trimStart();
+              if (remainder) {
+                line.appendChild(document.createTextNode(` ${remainder}`));
+              }
+
+              return line;
+            }
+
+            line.textContent = value;
+            return line;
+          })
+          .filter(Boolean);
+
+        if (lines.length === 0) {
+          return null;
+        }
+
+        const block = document.createElement("div");
+        lines.forEach((line) => {
+          block.appendChild(line);
+        });
+        return block;
+      }
+
+      function buildClipboardHTML(snapshotRoot) {
+        const blocks = Array.from(snapshotRoot.querySelectorAll("tr"))
+          .map((row) => row.matches("[data-clip-row]")
+            ? buildClipRowHTML(row)
+            : buildClipboardTextBlock(row.textContent ?? ""))
+          .filter(Boolean);
+
+        if (blocks.length === 0) {
+          return "";
+        }
+
+        const container = document.createElement("div");
+        blocks.forEach((block, index) => {
+          container.appendChild(block);
+          if (index < blocks.length - 1) {
+            container.appendChild(document.createElement("br"));
+          }
+        });
+        return container.innerHTML;
+      }
+
+      function copyWithExecCommand({ plainText, html }) {
+        const textarea = document.createElement("textarea");
+        textarea.value = plainText;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "fixed";
+        textarea.style.left = "-9999px";
+        textarea.style.top = "0";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+
+        const activeElement = document.activeElement;
+        textarea.focus();
+        textarea.select();
+
+        const handleCopy = (event) => {
+          event.preventDefault();
+          event.clipboardData.setData("text/plain", plainText);
+          if (html) {
+            event.clipboardData.setData("text/html", html);
+          }
+        };
+
+        document.addEventListener("copy", handleCopy, { once: true });
+        const copied = document.execCommand("copy");
+        textarea.remove();
+
+        if (activeElement && typeof activeElement.focus === "function") {
+          activeElement.focus();
+        }
+
+        if (!copied) {
+          throw new Error("document.execCommand('copy') returned false");
+        }
+      }
+
       function createClipboardSnapshot() {
         const copyRoot = getCopyRoot();
         if (!copyRoot || getResultsCount() === 0) {
@@ -246,8 +373,11 @@
             .join("\n\n")
         );
 
+        const html = buildClipboardHTML(snapshotRoot);
+
         return {
-          plainText
+          plainText,
+          html
         };
       }
 
@@ -257,29 +387,21 @@
           return;
         }
 
-        const { plainText } = snapshot;
+        const { plainText, html } = snapshot;
 
         try {
-          if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(plainText);
-          } else if (window.ClipboardItem && navigator.clipboard?.write) {
+          if (window.ClipboardItem && navigator.clipboard?.write) {
             const clipboardItem = new ClipboardItem({
-              "text/plain": new Blob([plainText], { type: "text/plain" })
+              "text/plain": new Blob([plainText], { type: "text/plain" }),
+              "text/html": new Blob([html], { type: "text/html" })
             });
             await navigator.clipboard.write([clipboardItem]);
+          } else if (document.queryCommandSupported?.("copy")) {
+            copyWithExecCommand({ plainText, html });
+          } else if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(plainText);
           } else {
-            const textarea = document.createElement("textarea");
-            textarea.value = plainText;
-            textarea.setAttribute("readonly", "");
-            textarea.style.position = "fixed";
-            textarea.style.left = "-9999px";
-            textarea.style.top = "0";
-            textarea.style.opacity = "0";
-            document.body.appendChild(textarea);
-            textarea.focus();
-            textarea.select();
-            document.execCommand("copy");
-            textarea.remove();
+            copyWithExecCommand({ plainText, html: "" });
           }
 
           setCopyState("copied", "Copied");

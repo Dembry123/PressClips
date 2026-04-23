@@ -53,6 +53,16 @@ func TestFormatPublicationName(t *testing.T) {
 			want: "The Irish Sun",
 		},
 		{
+			name: "thejournal ie metadata override",
+			raw:  "TheJournal",
+			want: "The Journal",
+		},
+		{
+			name: "thejournal metadata override",
+			raw:  "TheJournal.ie",
+			want: "The Journal",
+		},
+		{
 			name: "fallback to link host",
 			link: "https://www.foxnews.com/entertainment/story",
 			want: "Fox News",
@@ -171,5 +181,37 @@ func TestFetchPublicationNameFromArticleIncludesHTMLSnippetWhenMetadataMissing(t
 	}
 	if !strings.Contains(outcome.HTMLSnippet, "<head>") {
 		t.Fatalf("fetchPublicationNameFromArticle() html snippet = %q, want head preview", outcome.HTMLSnippet)
+	}
+}
+
+func TestIsNonOutletURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{
+			name: "aol uk excluded",
+			raw:  "https://www.aol.co.uk/articles/love-island-star-maura-higgins-114756151.html",
+			want: true,
+		},
+		{
+			name: "news outlet kept",
+			raw:  "https://www.thejournal.ie/maura-higgins-lands-a-spot-on-dancing-with-the-stars-us-7021495-Apr2026/",
+			want: false,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := isNonOutletURL(test.raw); got != test.want {
+				t.Fatalf("isNonOutletURL(%q) = %t, want %t", test.raw, got, test.want)
+			}
+		})
 	}
 }

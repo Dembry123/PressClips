@@ -104,6 +104,8 @@ var publicationNameOverrides = map[string]string{
 	"nytimes":        "The New York Times",
 	"ok":             "OK!",
 	"okmagazine":     "OK! Magazine",
+	"thejournal":     "The Journal",
+	"thejournalie":   "The Journal",
 	"theirishsun":    "The Irish Sun",
 	"thesunie":       "The Irish Sun",
 	"tmz":            "TMZ",
@@ -1722,6 +1724,7 @@ var searchEngineDomains = map[string]bool{
 var aggregatorDomains = map[string]bool{
 	"msn.com":       true,
 	"aol.com":       true,
+	"aol.co.uk":     true,
 	"yahoo.com":     true,
 	"newsbreak.com": true,
 	"smartnews.com": true,
