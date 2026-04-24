@@ -646,7 +646,7 @@ func renderedResultLogEntries(clips []clip) []map[string]any {
 			published = c.PublishedAt.Local().Format("January 2, 2006")
 		}
 		entries = append(entries, map[string]any{
-			"publication": formatPublicationName(c.Publication, c.Link),
+			"publication": outputPublicationName(c.Publication, c.Link),
 			"published":   published,
 			"title":       cleanTitle(c.Title),
 			"link":        c.Link,
@@ -1080,6 +1080,10 @@ func formatPublicationName(raw, link string) string {
 	}
 
 	return titleCasePublicationPhrase(name)
+}
+
+func outputPublicationName(raw, link string) string {
+	return strings.ToUpper(formatPublicationName(raw, link))
 }
 
 func publicationOverride(values ...string) string {
@@ -1819,7 +1823,7 @@ func renderResultsFragment(results []clip, query string, window searchWindow, er
 			published = row.PublishedAt.Local().Format("January 2, 2006")
 		}
 
-		pub := formatPublicationName(row.Publication, row.Link)
+		pub := outputPublicationName(row.Publication, row.Link)
 
 		b.WriteString(`<tr data-clip-row><td style="padding:0 0 12px 0; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; font-size:10pt; line-height:1.45; mso-line-height-rule:exactly; color:#000000;">`)
 		b.WriteString(`<div class="clip-row-card">`)

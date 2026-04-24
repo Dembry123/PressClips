@@ -81,6 +81,39 @@ func TestFormatPublicationName(t *testing.T) {
 	}
 }
 
+func TestOutputPublicationName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		link string
+		want string
+	}{
+		{
+			name: "override result uppercased at output",
+			raw:  "Mail Online",
+			want: "DAILY MAIL",
+		},
+		{
+			name: "fallback host uppercased at output",
+			link: "https://www.foxnews.com/entertainment/story",
+			want: "FOX NEWS",
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := outputPublicationName(test.raw, test.link); got != test.want {
+				t.Fatalf("outputPublicationName(%q, %q) = %q, want %q", test.raw, test.link, got, test.want)
+			}
+		})
+	}
+}
+
 func TestExtractPublicationNameFromHTML(t *testing.T) {
 	t.Parallel()
 
